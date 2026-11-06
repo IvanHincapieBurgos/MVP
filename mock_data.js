@@ -8,9 +8,12 @@
  *   - Peso del canal  ~ N(100, 8.5) kg, con estacionalidad y sesgo por granja.
  *   - Grasa dorsal    correlacionada con el peso y la genética de cada granja,
  *                     con una leve mejora a lo largo del año.
- *   - % Magro         inversamente proporcional a la grasa dorsal.
- *   - IQ-Col (0-100)  dependiente del % magro y de un rango de peso óptimo.
- *   - SEUROP          derivada del % magro; puntaje 1-10 lineal sobre el magro.
+ *   - % Magro         inversamente proporcional a la grasa dorsal, calibrado
+ *                     con los cuartiles reales de Colombia (~63-67 %).
+ *   - Puntaje SEUROP  0-1 lineal sobre el magro.
+ *
+ * El IQ-Col y la clasificación SEUROP NO vienen en la tabla: app.js los
+ * calcula con los cuartiles de seurop_quartiles.js (peso, magro, país, año).
  *
  * Se usa un generador pseudoaleatorio con semilla para que la "forma" de los
  * datos sea reproducible entre recargas. Las fechas cubren los últimos
@@ -120,16 +123,6 @@
   const elegirDia = crearSelectorPonderado(dias, dias.map((d) => d.peso));
   const elegirGranja = crearSelectorPonderado(GRANJAS, GRANJAS.map((g) => g.volumen));
 
-  /** Clasificación SEUROP a partir del % de magro (umbrales de referencia). */
-  function clasificarSeurop(magro) {
-    if (magro >= 60) return 'Superior';
-    if (magro >= 56) return 'Excelente';
-    if (magro >= 52) return 'Muy bueno';
-    if (magro >= 48) return 'Bueno';
-    if (magro >= 45) return 'Menos bueno';
-    return 'Baja';
-  }
-
   /* ---------- Generación de registros -------------------------------------- */
 
   const registros = new Array(TOTAL_REGISTROS);
@@ -147,21 +140,18 @@
       clamp(normal(17.2 + granja.sesgoGrasa + (peso - 100) * 0.12 + 1.4 * estacionalGrasa - 2.2 * avanceAnual, 3.6), 8, 28),
       1
     );
-    const magro = redondear(clamp(normal(70.5 - 0.95 * grasa, 1.8), 42, 66), 2);
-    const bonoPesoOptimo = peso >= 92 && peso <= 110 ? 6 : 0;
-    const iqCol = redondear(clamp(normal(((magro - 42) / 24) * 82 + 6 + bonoPesoOptimo, 9), 0, 100), 1);
-    const puntaje = redondear(clamp(1 + ((magro - 42) / 24) * 9, 1, 10), 1);
+    const magro = redondear(clamp(normal(74.5 - 0.6 * grasa, 1.2), 52, 74), 2);
+    const puntaje = redondear(clamp((magro - 52) / 22, 0, 1), 2);
 
     registros[i] = {
       id: 0, // se asigna después de ordenar cronológicamente
       fecha: dia.fecha,
+      pais: 'Colombia',
       planta: granja.planta,
       granja: granja.nombre,
       peso_kg: peso,
       grasa_dorsal_mm: grasa,
       porcentaje_magro: magro,
-      iq_col: iqCol,
-      clasificacion_seurop: clasificarSeurop(magro),
       puntaje_seurop: puntaje,
     };
   }

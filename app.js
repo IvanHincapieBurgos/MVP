@@ -57,26 +57,88 @@ App.utils = (function () {
    *  text: etiqueta sobre el sólido · soft/ink: fondo y texto de badges.
    */
   const SEUROP = [
-    { key: 'Superior',    letter: 'S', color: '#2f8f6b', text: '#ffffff', soft: '#dcebe4',     ink: '#164d3a' },
-    { key: 'Excelente',   letter: 'E', color: '#48a982', text: '#ffffff', soft: T.goodSoft,    ink: '#1f6b50' },
-    { key: 'Muy bueno',   letter: 'U', color: '#c9821f', text: '#ffffff', soft: T.warnSoft,    ink: '#8a5a12' },
-    { key: 'Bueno',       letter: 'R', color: '#eb5852', text: '#ffffff', soft: T.coralSoft,   ink: '#b2352f' },
-    { key: 'Menos bueno', letter: 'O', color: '#993935', text: '#ffffff', soft: T.primarySoft, ink: T.primaryD },
-    { key: 'Baja',        letter: 'P', color: '#7c2c29', text: '#ffffff', soft: '#efe2e1',     ink: '#5e211f' },
+    { key: 'Superior',    letter: 'S', color: '#559c75ff', text: '#ffffff', soft: '#dcebe4',     ink: '#164d3a' },
+    { key: 'Excelente',   letter: 'E', color: '#709712ff', text: '#ffffff', soft: '#ebf1d9',     ink: '#4a640c' },
+    { key: 'Muy bueno',   letter: 'U', color: '#6b8de0ff', text: '#ffffff', soft: '#e4ebfa',     ink: '#2f4f9e' },
+    { key: 'Bueno',       letter: 'R', color: '#a37500ff', text: '#ffffff', soft: '#f5ecd5',     ink: '#6b4d00' },
+    { key: 'Menos bueno', letter: 'O', color: '#b75c20ff', text: '#ffffff', soft: '#f6e5d9',     ink: '#7a3d14' },
+    { key: 'Baja',        letter: 'P', color: '#be4f43ff', text: '#ffffff', soft: '#f7e1de',     ink: '#7f2e25' },
   ];
   const SEUROP_INDEX = Object.fromEntries(SEUROP.map((s, i) => [s.key, i]));
 
-  /** IQ-Col (0-100) agrupado en 5 bandas de 20 puntos para hallar la predominante. */
-  const IQ_COL = [
-    { key: 'S', min: 80, rango: '≥ 80',    color: T.primaryD },
-    { key: 'E', min: 60, rango: '60 – 80', color: T.primary },
-    { key: 'U', min: 40, rango: '40 – 60', color: '#c98a86' },
-    { key: 'R', min: 20, rango: '20 – 40', color: '#e6c9c6' },
-    { key: 'O', min: 0,  rango: '< 20',    color: T.greyLight },
-  ];
+  /**
+   * Paso 3 — Escala SEUROP a partir del IQ-Col (mismo orden S·E·U·R·O·P que
+   * SEUROP, por lo que el índice de IQ_COL es también el índice de SEUROP).
+   */
+const IQ_COL = [
+  { key: 'S', orden: 1, label: 'Superior',      min: 100,   rango: '> 100',         color: T.primaryD },
+  { key: 'E', orden: 2, label: 'Excelente',     min: 87.29, rango: '87.29 – < 100', color: T.primary },
+  { key: 'U', orden: 3, label: 'Muy bueno',     min: 57.78, rango: '57.78 – < 87.29', color: '#c98a86' },
+  { key: 'R', orden: 4, label: 'Bueno',         min: 43.44, rango: '43.44 – < 57.78', color: '#e6c9c6' },
+  { key: 'O', orden: 5, label: 'Menos buenos',  min: 13.32, rango: '13.32 – < 43.44', color: '#f0dedc' },
+  { key: 'P', orden: 6, label: 'Bajo',          min: -Infinity, rango: '< 13.32',   color: T.greyLight },
+];
+
+// Clasifica un puntaje igual que la expresión if() anidada
+const clasificarIQ = (puntos) =>
+  IQ_COL.find(c => puntos >= c.min) ?? IQ_COL[IQ_COL.length - 1];
   function iqColIndex(v) {
     for (let i = 0; i < IQ_COL.length; i++) if (v >= IQ_COL[i].min) return i;
     return IQ_COL.length - 1;
+  }
+
+  /* ---------- IQ-Col con cuartiles (seurop_quartiles.js) ------------------
+   * Paso 1  peso_norm  = (peso  − Q25_peso_nac)   / (Q75_peso_nac   − Q25_peso_nac)
+   *         magro_norm = (magro − Q25_magro_rango) / (Q75_magro_rango − Q25_magro_rango)
+   *         · cuartiles de peso: fijos por país y año
+   *         · cuartiles de magro: los del rango de peso al que pertenece la canal
+   * Paso 2  IQ-Col = (peso_norm × 50) + (magro_norm × 50)
+   * ----------------------------------------------------------------------- */
+  const QUARTILES = window.SEUROP_QUARTILES;
+  if (!QUARTILES) {
+    throw new Error('window.SEUROP_QUARTILES no está disponible: seurop_quartiles.js debe cargarse antes que app.js.');
+  }
+  const PAIS_DEFAULT = 'Colombia';
+  const IQ_PESO_PONDERACION = 50;
+  const IQ_MAGRO_PONDERACION = 50;
+
+  /** Rango de peso en canal (kg) con las mismas claves de `clase_peso_canal` del JSON. */
+  function clasePesoCanal(peso) {
+    if (peso < 60) return 'bajo';
+    if (peso <= 70) return 'a.60<=70kg';
+    if (peso <= 80) return 'b.>70<=80kg';
+    if (peso <= 90) return 'c.>80<=90kg';
+    if (peso <= 100) return 'd.>90<=100kg';
+    if (peso <= 110) return 'e.>100<=110kg';
+    if (peso <= 120) return 'f.>110<=120kg';
+    return 'Alto';
+  }
+
+  /**
+   * Parámetros del país para el año de la canal. Si ese año no está en la
+   * tabla se usa el año anterior más reciente (o el más antiguo disponible).
+   */
+  const quartileCache = new Map();
+  function quartilesFor(pais, anio) {
+    const key = `${pais}|${anio}`;
+    if (quartileCache.has(key)) return quartileCache.get(key);
+    const porAnio = QUARTILES[pais] || QUARTILES[PAIS_DEFAULT];
+    const anios = Object.keys(porAnio).map(Number);
+    const previos = anios.filter((a) => a <= anio);
+    const q = porAnio[previos.length ? Math.max(...previos) : Math.min(...anios)];
+    quartileCache.set(key, q);
+    return q;
+  }
+
+  const normalizar = (v, [q25, q75]) => (v - q25) / (q75 - q25);
+
+  /** IQ-Col de una canal. `magro` se acepta en % (54,3) o en fracción (0,543). */
+  function calcIqCol(pesoKg, magro, pais, anio) {
+    const q = quartilesFor(pais || PAIS_DEFAULT, anio);
+    const magroFrac = magro > 1 ? magro / 100 : magro;
+    const pesoNorm = normalizar(pesoKg, q.peso);
+    const magroNorm = normalizar(magroFrac, q.magro[clasePesoCanal(pesoKg)]);
+    return pesoNorm * IQ_PESO_PONDERACION + magroNorm * IQ_MAGRO_PONDERACION;
   }
 
   const GRANULARIDADES = [
@@ -187,7 +249,7 @@ App.utils = (function () {
   }
 
   return {
-    SEUROP, SEUROP_INDEX, IQ_COL, iqColIndex, GRANULARIDADES, granLabel,
+    SEUROP, SEUROP_INDEX, IQ_COL, iqColIndex, clasePesoCanal, calcIqCol, GRANULARIDADES, granLabel,
     fmt, fmtPct, fmtId, addDays, formatDate, periodKeys, periodLabel,
     escapeHtml, seuropBadge, iqBadge, icons, argmax,
   };
@@ -218,8 +280,11 @@ App.data = (function () {
     r._mes = k.mes;
     r._trimestre = k.trimestre;
     r._anio = k.anio;
-    r._seu = U.SEUROP_INDEX[r.clasificacion_seurop];
+    // IQ-Col calculado con los cuartiles (pasos 1-2) y clase SEUROP derivada de él (paso 3)
+    r.iq_col = U.calcIqCol(r.peso_kg, r.porcentaje_magro, r.pais, +k.anio);
     r._iq = U.iqColIndex(r.iq_col);
+    r._seu = r._iq;
+    r.clasificacion_seurop = U.SEUROP[r._seu].key;
     if (r.fecha < minDate) minDate = r.fecha;
     if (r.fecha > maxDate) maxDate = r.fecha;
   }
@@ -242,7 +307,7 @@ App.data = (function () {
     return out;
   }
 
-  const createAcc = (key) => ({ key, n: 0, peso: 0, magro: 0, grasa: 0, iq: 0, seu: [0, 0, 0, 0, 0, 0], iqc: [0, 0, 0, 0, 0] });
+  const createAcc = (key) => ({ key, n: 0, peso: 0, magro: 0, grasa: 0, iq: 0, seu: [0, 0, 0, 0, 0, 0], iqc: [0, 0, 0, 0, 0, 0] });
 
   function accumulate(a, r) {
     a.n++;
@@ -1488,6 +1553,35 @@ App.views.despacho = (function () {
 
   /* ---------- Scatter ------------------------------------------------------ */
 
+  /** Constantes de referencia del gráfico de dispersión. */
+  const REF_MAGRO = 64.6; // % magro
+  const REF_PESO = 101.7; // kg
+
+  /**
+   * Serie vacía que solo dibuja las líneas de referencia: al no estar en la
+   * leyenda, ocultar una categoría SEUROP no oculta las constantes.
+   */
+  function referenceLinesSeries() {
+    const label = { color: T.ink, fontWeight: 700, fontSize: 11, backgroundColor: 'rgba(255,255,255,.85)', padding: [2, 4], borderRadius: 4 };
+    return {
+      name: 'Referencias',
+      type: 'scatter',
+      data: [],
+      silent: true,
+      z: 10,
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        animation: false,
+        lineStyle: { color: T.ink, type: 'dashed', width: 1.5, opacity: 0.8 },
+        data: [
+          { yAxis: REF_MAGRO, label: { ...label, position: 'insideEndTop', formatter: `Magro ${U.fmtPct(REF_MAGRO, 2)}` } },
+          { xAxis: REF_PESO, label: { ...label, position: 'insideEndTop', formatter: `Peso ${U.fmt(REF_PESO, 1)} kg` } },
+        ],
+      },
+    };
+  }
+
   function renderScatter(rows) {
     if (!rows.length) return C.setEmpty(scatter);
 
@@ -1536,7 +1630,7 @@ App.views.despacho = (function () {
           },
         },
         xAxis: { ...axisBase, name: 'Peso del canal (kg)', nameGap: 30, min: 75, max: 125, interval: 5 },
-        yAxis: { ...axisBase, name: '% Magro', nameGap: 42, min: 40, max: 68, interval: 4 },
+        yAxis: { ...axisBase, name: '% Magro', nameGap: 42, min: 52, max: 74, interval: 2 },
         dataZoom: [
           { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
           { type: 'inside', yAxisIndex: 0, filterMode: 'none' },
@@ -1550,7 +1644,7 @@ App.views.despacho = (function () {
           largeThreshold: 1500,
           itemStyle: { color: s.color, opacity: 0.6 },
           emphasis: { focus: 'series' },
-        })),
+        })).concat(referenceLinesSeries()),
       },
       true
     );
@@ -1595,7 +1689,7 @@ App.views.despacho = (function () {
       { key: 'porcentaje_magro', label: '% Magro', align: 'right', render: (r) => U.fmtPct(r.porcentaje_magro, 2) },
       // Orden por jerarquía de calidad (Superior → Baja), no alfabético
       { key: 'clasificacion_seurop', label: 'Clasificación SEUROP', defaultDir: 'asc', sortValue: (r) => r._seu, render: (r) => U.seuropBadge(r._seu) },
-      { key: 'puntaje_seurop', label: 'Puntaje SEUROP', align: 'right', render: (r) => `<span class="font-bold">${U.fmt(r.puntaje_seurop, 1)}</span>` },
+      { key: 'puntaje_seurop', label: 'Puntaje SEUROP', align: 'right', render: (r) => `<span class="font-bold">${U.fmt(r.puntaje_seurop, 2)}</span>` },
     ];
   }
 

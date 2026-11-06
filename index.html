@@ -196,7 +196,7 @@
 
         <nav class="mt-8 flex flex-1 flex-col gap-1" aria-label="Navegación principal">
           <p class="px-4 pb-2 text-[0.66rem] font-bold uppercase tracking-[0.12em] text-grey-mid">Módulos</p>
-          <a href="#inicio" data-nav="inicio" class="flex items-center gap-3 rounded-full px-4 py-2.5 text-sm transition-colors text-grey-strong hover:bg-surface hover:text-ink"><i data-lucide="layout-dashboard" class="h-[18px] w-[18px] shrink-0"></i>Tablero a la medida</a>
+          <a href="#inicio" data-nav="inicio" class="flex items-center gap-3 rounded-full px-4 py-2.5 text-sm transition-colors text-grey-strong hover:bg-surface hover:text-ink"><i data-lucide="layout-dashboard" class="h-[18px] w-[18px] shrink-0"></i>Inicio</a>
           <a href="#despacho" data-nav="despacho" class="flex items-center gap-3 rounded-full px-4 py-2.5 text-sm transition-colors text-grey-strong hover:bg-surface hover:text-ink"><i data-lucide="truck" class="h-[18px] w-[18px] shrink-0"></i>Despacho</a>
           <a href="#scores" data-nav="scores" class="flex items-center gap-3 rounded-full px-4 py-2.5 text-sm transition-colors text-grey-strong hover:bg-surface hover:text-ink"><i data-lucide="gauge" class="h-[18px] w-[18px] shrink-0"></i>Scores</a>
         </nav>
@@ -225,7 +225,7 @@
           <div class="mb-3 flex items-center gap-3 border-b border-line pb-3 lg:hidden">
             <a href="#inicio" class="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary text-white" aria-label="Pigbox · inicio"><i data-lucide="chart-column" class="h-4 w-4"></i></a>
             <nav class="no-scrollbar flex min-w-0 gap-1 overflow-x-auto" aria-label="Navegación principal (móvil)">
-              <a href="#inicio" data-nav="inicio" class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[0.8rem] transition-colors text-grey-strong hover:bg-surface hover:text-ink">Tablero a la medida</a>
+              <a href="#inicio" data-nav="inicio" class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[0.8rem] transition-colors text-grey-strong hover:bg-surface hover:text-ink">Inicio</a>
               <a href="#despacho" data-nav="despacho" class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[0.8rem] transition-colors text-grey-strong hover:bg-surface hover:text-ink">Despacho</a>
               <a href="#scores" data-nav="scores" class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[0.8rem] transition-colors text-grey-strong hover:bg-surface hover:text-ink">Scores</a>
             </nav>
@@ -264,6 +264,7 @@
 
     <!-- 1. Datos mock (expone window.DASHBOARD_DATA) -->
     <script src="mock_data.js"></script>
+    <script src="seurop_quartiles.js"></script>
     <!-- 2. Aplicación (filtros, tablas, gráficos y router) -->
     <script src="app.js"></script>
   </body>
