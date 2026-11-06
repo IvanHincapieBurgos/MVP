@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cipa Cerdos</title>
+    <meta name="description" content="Monitorización de rendimiento de canales, calidad cárnica y clasificación SEUROP por planta y granja." />
+
+    <!-- ===== Dependencias vía CDN (sin instalación local) ===== -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.11"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- ===== Sistema de diseño: tokens corporativos ===== -->
+    <style type="text/tailwindcss">
+      @theme {
+        --color-primary: #993935;
+        --color-primary-d: #7c2c29;
+        --color-primary-soft: #f5e9e8;
+        --color-accent: #eb5852;
+        --color-accent-d: #d9433d;
+        --color-coral-soft: #fcebea;
+
+        --color-ink: #2a211f;
+        --color-grey-strong: #6e6660;
+        --color-grey-mid: #8b8b8d;
+        --color-grey-light: #cccccc;
+        --color-line: #ece7e3;
+        --color-surface: #fbfaf9;
+        --color-bg: #f7f5f3;
+
+        --color-good: #2f8f6b;       --color-good-soft: #e4f1eb;
+        --color-warn: #c9821f;       --color-warn-soft: #f8ecd8;
+        --color-crit: #c0392b;       --color-crit-soft: #fbe7e4;
+
+        --font-sans: "Inter", system-ui, sans-serif;
+        --font-display: "Inter", system-ui, sans-serif;
+
+        --shadow-card: 0 1px 2px #2a211f0d, 0 10px 34px #2a211f12;
+      }
+      .num { font-variant-numeric: tabular-nums; }
+      .no-scrollbar { scrollbar-width: none; }
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+
+      /* --- Sidebar colapsable (fuera de @layer para prevalecer sobre las utilidades w-64 / p-4) --- */
+      .sidebar { transition: width .22s ease, padding .22s ease, border-width .22s ease; }
+      body[data-sidebar="collapsed"] .sidebar { width: 0; padding-left: 0; padding-right: 0; border-right-width: 0; }
+      body[data-sidebar="collapsed"] [data-icon="close"],
+      body:not([data-sidebar="collapsed"]) [data-icon="open"] { display: none; }
+      @media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+    </style>
+
+    <!-- ===== Componentes del sistema (construidos sobre los tokens) ===== -->
+    <style type="text/tailwindcss">
+      @layer base {
+        html { background: var(--color-bg); }
+        body { background: var(--color-bg); color: var(--color-ink); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+        :focus-visible { outline: 2px solid color-mix(in srgb, var(--color-primary) 55%, white); outline-offset: 2px; }
+        ::selection { background: var(--color-primary-soft); color: var(--color-primary-d); }
+      }
+
+      @layer components {
+        /* --- Tarjetas --- */
+        .card { background: #fff; border: 1px solid var(--color-line); border-radius: 18px; box-shadow: var(--shadow-card); }
+        .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1.25rem 1.4rem .75rem; }
+        .card-title { font-family: var(--font-display); font-size: 1rem; font-weight: 700; color: var(--color-ink); letter-spacing: -.01em; }
+        .card-subtitle { margin-top: 3px; font-size: .8rem; color: var(--color-grey-strong); }
+        .eyebrow { font-size: .7rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--color-primary); }
+
+        /* --- KPI --- */
+        .kpi-icon { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; border-radius: 10px; background: var(--color-primary-soft); color: var(--color-primary); }
+        .kpi-icon svg { width: 16px; height: 16px; }
+        .kpi-label { font-size: .7rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--color-grey-mid); }
+        .kpi-value { font-family: var(--font-display); font-size: 2rem; line-height: 1; font-weight: 800; color: var(--color-ink); letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+        .kpi-sub { margin-top: .5rem; font-size: .75rem; line-height: 1.35; color: var(--color-grey-strong); }
+
+        /* --- Controles de filtro (barra superior, compactos) --- */
+        .input, .ms-trigger {
+          height: 34px; width: 100%; padding: 0 .65rem; border: 1px solid #e0d9d4; border-radius: 9px;
+          background: #fff; color: var(--color-ink); font-size: .8rem; transition: border-color .15s, box-shadow .15s;
+        }
+        .input:hover, .ms-trigger:hover { border-color: var(--color-grey-light); }
+        .input:focus, .ms-trigger:focus-visible, .ms-trigger[aria-expanded="true"] {
+          outline: none; border-color: var(--color-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 14%, transparent);
+        }
+        .input::-webkit-calendar-picker-indicator { opacity: .55; cursor: pointer; }
+        select.input {
+          appearance: none; padding-right: 1.9rem; cursor: pointer; font-weight: 600;
+          background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238b8b8d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right .55rem center;
+        }
+
+        .segmented { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; background: var(--color-bg); border: 1px solid var(--color-line); }
+        .segmented button { height: 28px; padding: 0 .6rem; border-radius: 8px; font-size: .78rem; font-weight: 600; color: var(--color-grey-strong); white-space: nowrap; transition: background .15s, color .15s; }
+        .segmented button:hover { color: var(--color-ink); }
+        .segmented button[aria-pressed="true"] { background: var(--color-primary); color: #fff; box-shadow: 0 1px 2px #7c2c2940; }
+
+        /* Desvanecido en los bordes cuando hay filtros fuera de vista (scroll horizontal sin barra) */
+        .scroll-fade[data-fade="right"] { mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
+        .scroll-fade[data-fade="left"] { mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent); }
+        .scroll-fade[data-fade="both"] { mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); }
+
+        .btn-ghost { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; height: 34px; min-width: 34px; padding: 0 .65rem; border-radius: 9px; border: 1px solid var(--color-line); background: #fff; font-size: .75rem; font-weight: 600; color: var(--color-grey-strong); }
+        .btn-ghost:hover { color: var(--color-primary); border-color: color-mix(in srgb, var(--color-primary) 35%, white); background: var(--color-surface); }
+        .btn-primary { display: inline-flex; align-items: center; gap: .45rem; height: 40px; padding: 0 1.1rem; border-radius: 10px; background: var(--color-primary); color: #fff; font-size: .85rem; font-weight: 700; transition: background .15s; }
+        .btn-primary:hover { background: var(--color-primary-d); }
+
+        /* --- Multiselect (el panel flota en <body> para no recortarse con el scroll horizontal) --- */
+        .ms-trigger { display: flex; align-items: center; gap: .4rem; text-align: left; }
+        .ms-prefix { flex-shrink: 0; font-weight: 600; color: var(--color-grey-mid); }
+        .ms-summary { min-width: 0; flex: 1; font-weight: 600; }
+        .ms-trigger svg { flex-shrink: 0; color: var(--color-grey-mid); transition: transform .15s; }
+        .ms-trigger[aria-expanded="true"] svg { transform: rotate(180deg); color: var(--color-primary); }
+        .ms-panel { position: fixed; z-index: 60; min-width: 260px; overflow: hidden; border: 1px solid var(--color-line); border-radius: 14px; background: #fff; box-shadow: 0 18px 44px #2a211f24; }
+        .ms-actions { display: flex; justify-content: space-between; padding: .5rem .85rem; border-bottom: 1px solid var(--color-line); background: var(--color-surface); }
+        .ms-actions button { font-size: .75rem; font-weight: 700; color: var(--color-primary); }
+        .ms-actions button:hover { color: var(--color-primary-d); text-decoration: underline; }
+        .ms-list { max-height: 270px; overflow: auto; padding: .3rem 0; }
+        .ms-group { padding: .55rem .9rem .2rem; font-size: .66rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--color-grey-mid); }
+        .ms-option { display: flex; align-items: center; gap: .6rem; padding: .42rem .9rem; font-size: .84rem; color: var(--color-ink); cursor: pointer; }
+        .ms-option:hover { background: var(--color-surface); }
+        .ms-option input { width: 15px; height: 15px; accent-color: var(--color-primary); cursor: pointer; }
+
+        /* --- Toggle pills (series del gráfico) --- */
+        .toggle-pill { position: relative; display: inline-flex; align-items: center; gap: .45rem; height: 30px; padding: 0 .8rem; cursor: pointer; user-select: none; border-radius: 999px; border: 1px solid var(--color-line); font-size: .78rem; font-weight: 600; color: var(--color-grey-mid); transition: all .15s; }
+        .toggle-pill input { position: absolute; opacity: 0; pointer-events: none; }
+        .toggle-pill .dot { width: 10px; height: 10px; border-radius: 999px; border: 2px solid currentColor; }
+        .toggle-pill:has(input:checked) { color: var(--color-ink); border-color: color-mix(in srgb, var(--c) 40%, white); background: color-mix(in srgb, var(--c) 9%, white); }
+        .toggle-pill:has(input:checked) .dot { background: var(--c); border-color: var(--c); }
+        .toggle-pill:has(input:focus-visible) { box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 20%, transparent); }
+
+        /* --- Tablas --- */
+        .table-scroll { overflow: auto; }
+        .data-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .84rem; }
+        .data-table thead th {
+          position: sticky; top: 0; z-index: 1; padding: .7rem .9rem; text-align: left; vertical-align: bottom; line-height: 1.35;
+          background: var(--color-surface); border-bottom: 1px solid var(--color-line);
+          font-size: .68rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--color-grey-mid);
+        }
+        .data-table thead th[data-key] { cursor: pointer; user-select: none; }
+        .data-table thead th[data-key]:hover { color: var(--color-ink); }
+        .data-table thead th.is-sorted { color: var(--color-primary); }
+        .data-table .th-inner { display: inline-flex; align-items: flex-end; gap: .3rem; }
+        .data-table th.is-right .th-inner { flex-direction: row-reverse; }
+        .data-table .sort-icon { display: inline-flex; flex-shrink: 0; margin-bottom: 1px; opacity: .35; }
+        .data-table th.is-sorted .sort-icon { opacity: 1; }
+        .data-table tbody td { padding: .65rem .9rem; border-bottom: 1px solid var(--color-line); color: var(--color-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .data-table tbody tr:last-child td { border-bottom: 0; }
+        .data-table tbody tr:hover td { background: color-mix(in srgb, var(--color-primary-soft) 55%, white); }
+        .data-table tfoot td { padding: .7rem .9rem; border-top: 1px solid var(--color-line); background: var(--color-surface); font-weight: 700; color: var(--color-ink); font-variant-numeric: tabular-nums; }
+        .data-table .is-right { text-align: right; }
+        .data-table .is-center { text-align: center; }
+        .data-table .empty-cell { padding: 2.75rem 1rem; text-align: center; color: var(--color-grey-mid); white-space: normal; }
+        .data-table--compact thead th, .data-table--compact tbody td, .data-table--compact tfoot td { padding-left: .6rem; padding-right: .6rem; }
+
+        .bar-cell { display: flex; align-items: center; justify-content: flex-end; gap: .6rem; }
+        .bar-track { width: 72px; height: 6px; overflow: hidden; border-radius: 999px; background: var(--color-bg); }
+        .bar-fill { height: 100%; border-radius: 999px; background: var(--color-primary); }
+
+        /* --- Paginación --- */
+        .pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; padding: .9rem .9rem .55rem; border-top: 1px solid var(--color-line); }
+        .pager-info { font-size: .8rem; color: var(--color-grey-strong); }
+        .pager-info b { color: var(--color-ink); font-weight: 700; }
+        .pager-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem; }
+        .pager-controls button { min-width: 32px; height: 32px; padding: 0 .5rem; border-radius: 9px; font-size: .8rem; font-weight: 600; color: var(--color-grey-strong); font-variant-numeric: tabular-nums; }
+        .pager-controls button:hover:not(:disabled) { background: var(--color-primary-soft); color: var(--color-primary-d); }
+        .pager-controls button.is-current { background: var(--color-primary); color: #fff; }
+        .pager-controls button:disabled { opacity: .35; cursor: not-allowed; }
+        .pager-controls .ellipsis { padding: 0 .25rem; color: var(--color-grey-mid); }
+
+        /* --- Badges --- */
+        .badge { display: inline-flex; align-items: center; gap: .4rem; padding: .2rem .62rem; border-radius: 999px; font-size: .72rem; font-weight: 700; white-space: nowrap; }
+        .badge .dot { width: 7px; height: 7px; border-radius: 999px; }
+        .badge-neutral { background: var(--color-bg); color: var(--color-grey-strong); border: 1px solid var(--color-line); }
+      }
+    </style>
+  </head>
+
+  <body class="min-h-screen bg-bg font-sans text-ink">
+    <div class="flex min-h-screen">
+      <!-- ===== Sidebar lateral izquierdo: marca · navegación · perfil ===== -->
+      <aside id="sidebar" class="sidebar sticky top-0 hidden h-screen w-64 shrink-0 overflow-hidden border-r border-line bg-white p-4 lg:block" aria-label="Barra lateral" data-shell="sidebar">
+        <!-- Ancho fijo interno: el contenido no se reacomoda mientras el sidebar se colapsa -->
+        <div class="flex h-full w-56 flex-col">
+        <a href="#inicio" class="flex items-center gap-3 px-2 py-1.5">
+          <span class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-primary text-white shadow-[0_4px_12px_#99393540]">
+            <i data-lucide="chart-column" class="h-5 w-5"></i>
+          </span>
+          <span class="min-w-0 leading-tight">
+            <span class="block font-display text-base font-extrabold tracking-tight text-ink">Pigbox</span>
+            <span class="block text-[11px] font-semibold text-grey-mid">Calidad de canales</span>
+          </span>
+        </a>
+
+        <nav class="mt-8 flex flex-1 flex-col gap-1" aria-label="Navegación principal">
+          <p class="px-4 pb-2 text-[0.66rem] font-bold uppercase tracking-[0.12em] text-grey-mid">Módulos</p>
+          <a href="#inicio" data-nav="inicio" class="flex items-center gap-3 rounded-full px-4 py-2.5 text-sm transition-colors text-grey-strong hover:bg-surface hover:text-ink"><i data-lucide="layout-dashboard" class="h-[18px] w-[18px] shrink-0"></i>Tablero a la medida</a>
+          <a href="#despacho" data-nav="despacho" class="flex items-center gap-3 rounded-full px-4 py-2.5 text-sm transition-colors text-grey-strong hover:bg-surface hover:text-ink"><i data-lucide="truck" class="h-[18px] w-[18px] shrink-0"></i>Despacho</a>
+          <a href="#scores" data-nav="scores" class="flex items-center gap-3 rounded-full px-4 py-2.5 text-sm transition-colors text-grey-strong hover:bg-surface hover:text-ink"><i data-lucide="gauge" class="h-[18px] w-[18px] shrink-0"></i>Scores</a>
+        </nav>
+
+        <div class="mt-4 space-y-3 border-t border-line pt-4">
+          <div class="flex items-center gap-2 px-2 text-[11px] text-grey-strong">
+            <span class="relative flex h-2 w-2 shrink-0"><span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-good opacity-50"></span><span class="relative inline-flex h-2 w-2 rounded-full bg-good"></span></span>
+            <span class="truncate"><span class="font-semibold text-ink" data-meta="fuente">—</span> · <span class="num" data-meta="total">—</span> registros</span>
+          </div>
+          <div class="flex items-center gap-3 rounded-2xl bg-surface p-2.5">
+            <span class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-primary-soft text-primary"><i data-lucide="user-round" class="h-[18px] w-[18px]"></i></span>
+            <span class="min-w-0 leading-tight">
+              <span class="block truncate text-[0.8rem] font-semibold text-ink">usuario@ejemplo.com</span>
+              <span class="block text-[11px] text-grey-mid">Analista</span>
+            </span>
+          </div>
+        </div>
+        </div>
+      </aside>
+
+      <!-- ===== Columna principal ===== -->
+      <div class="flex min-w-0 flex-1 flex-col">
+        <!-- Barra superior: título dinámico + filtros globales -->
+        <header class="sticky top-0 z-30 border-b border-line bg-white/95 px-4 py-3 backdrop-blur md:px-6">
+          <!-- Navegación compacta para pantallas sin sidebar -->
+          <div class="mb-3 flex items-center gap-3 border-b border-line pb-3 lg:hidden">
+            <a href="#inicio" class="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary text-white" aria-label="Pigbox · inicio"><i data-lucide="chart-column" class="h-4 w-4"></i></a>
+            <nav class="no-scrollbar flex min-w-0 gap-1 overflow-x-auto" aria-label="Navegación principal (móvil)">
+              <a href="#inicio" data-nav="inicio" class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[0.8rem] transition-colors text-grey-strong hover:bg-surface hover:text-ink">Tablero a la medida</a>
+              <a href="#despacho" data-nav="despacho" class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[0.8rem] transition-colors text-grey-strong hover:bg-surface hover:text-ink">Despacho</a>
+              <a href="#scores" data-nav="scores" class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[0.8rem] transition-colors text-grey-strong hover:bg-surface hover:text-ink">Scores</a>
+            </nav>
+          </div>
+
+          <!-- Título a la izquierda y filtros a la derecha cuando hay ancho suficiente; en dos filas si no -->
+          <div class="flex flex-col gap-3 min-[1680px]:flex-row min-[1680px]:items-center min-[1680px]:gap-6">
+            <div class="flex min-w-0 shrink-0 items-center gap-3">
+              <button type="button" class="btn-ghost hidden shrink-0 lg:inline-flex" data-shell="sidebar-toggle" aria-controls="sidebar" aria-expanded="true" aria-label="Ocultar menú lateral" title="Ocultar menú lateral">
+                <i data-lucide="panel-left-close" class="h-4 w-4" data-icon="close"></i>
+                <i data-lucide="panel-left-open" class="h-4 w-4" data-icon="open"></i>
+              </button>
+              <div class="min-w-0">
+                <h1 class="font-display text-lg font-extrabold leading-tight tracking-tight text-ink" data-shell="title">Tablero a la medida</h1>
+                <p class="mt-0.5 text-xs text-grey-strong"><strong class="num font-bold text-ink" data-shell="count">0</strong> canales en la selección</p>
+              </div>
+            </div>
+            <div class="scroll-fade no-scrollbar min-w-0 flex-1 overflow-x-auto" role="region" aria-label="Filtros globales" data-shell="filters-scroll">
+              <div class="flex w-max items-center gap-2 py-0.5 min-[1680px]:ml-auto" data-shell="filters"></div>
+            </div>
+          </div>
+        </header>
+
+        <!-- Contenido: cada vista se monta bajo demanda -->
+        <main class="flex-1 px-4 py-6 md:px-6">
+          <section data-view="inicio" hidden></section>
+          <section data-view="despacho" hidden></section>
+          <section data-view="scores" hidden></section>
+        </main>
+
+        <footer class="px-4 pb-8 text-xs text-grey-mid md:px-6">
+          Tablero a la medida · MVP con datos simulados de la tabla <code class="font-semibold text-grey-strong">canales</code>
+        </footer>
+      </div>
+    </div>
+
+    <!-- 1. Datos mock (expone window.DASHBOARD_DATA) -->
+    <script src="mock_data.js"></script>
+    <!-- 2. Aplicación (filtros, tablas, gráficos y router) -->
+    <script src="app.js"></script>
+  </body>
+</html>
