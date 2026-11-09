@@ -148,6 +148,8 @@
         .data-table th.is-sorted .sort-icon { opacity: 1; }
         .data-table tbody td { padding: .65rem .9rem; border-bottom: 1px solid var(--color-line); color: var(--color-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
         .data-table tbody tr:last-child td { border-bottom: 0; }
+        /* Filas alternas (antes del hover para que este prevalezca) */
+        .data-table--striped tbody tr:nth-child(even) td { background: var(--color-surface); }
         .data-table tbody tr:hover td { background: color-mix(in srgb, var(--color-primary-soft) 55%, white); }
         .data-table tfoot td { padding: .7rem .9rem; border-top: 1px solid var(--color-line); background: var(--color-surface); font-weight: 700; color: var(--color-ink); font-variant-numeric: tabular-nums; }
         .data-table .is-right { text-align: right; }
@@ -169,6 +171,16 @@
         .pager-controls button.is-current { background: var(--color-primary); color: #fff; }
         .pager-controls button:disabled { opacity: .35; cursor: not-allowed; }
         .pager-controls .ellipsis { padding: 0 .25rem; color: var(--color-grey-mid); }
+
+        /* --- Selector tipo pill (Score Granja): chevron propio sobre el <select> nativo --- */
+        .pill-select {
+          appearance: none; cursor: pointer; padding-right: 1.9rem; font-weight: 600; color: var(--color-ink);
+          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238b8b8d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+          background-repeat: no-repeat; background-position: right .6rem center;
+          transition: border-color .15s, box-shadow .15s;
+        }
+        .pill-select:hover { border-color: var(--color-grey-light); }
+        .pill-select:focus { outline: none; border-color: var(--color-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 14%, transparent); }
 
         /* --- Badges --- */
         .badge { display: inline-flex; align-items: center; gap: .4rem; padding: .2rem .62rem; border-radius: 999px; font-size: .72rem; font-weight: 700; white-space: nowrap; }

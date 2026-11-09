@@ -19,7 +19,19 @@
  * datos sea reproducible entre recargas. Las fechas cubren los últimos
  * 12 meses contados desde el día actual.
  *
- * Expone:  window.DASHBOARD_DATA = { meta, catalogos, registros }
+ * Atributos operacionales y trazabilidad (generados con un PRNG independiente
+ * para NO alterar la secuencia de los campos originales):
+ *   comercializador, color, variacion_color, sistema_medicion   (nullable ~5 %)
+ *   fecha_ingreso_planta  → fecha_pesaje_pie (+15-45 min)
+ *                         → fecha_sacrificio (+1.5-20 h)
+ *                             → fecha_canal_caliente (+20-50 min)
+ *                             → fecha_canal_fria     (+2-24 h)
+ *   peso_canal_caliente_kg, peso_canal_fria_kg                   (nullable)
+ *   tiempo_espera_sacrificio_min / _horas  (calculados: sacrificio - ingreso)
+ * Timestamps en hora local con formato 'YYYY-MM-DD HH:mm:ss'.
+ *
+ * Expone:  window.DASHBOARD_DATA = { meta, catalogos, registros, helpers }
+ *          window.calcularTiempoEsperaSacrificio(registro)
  * ========================================================================== */
 (function () {
   'use strict';
@@ -41,12 +53,12 @@
   }
   const rand = mulberry32(SEMILLA);
 
-  /** Muestra de una distribución normal (Box-Muller). */
-  function normal(media, desviacion) {
+  /** Muestra de una distribución normal (Box-Muller). `rng` permite usar otro PRNG. */
+  function normal(media, desviacion, rng = rand) {
     let u = 0;
     let v = 0;
-    while (u === 0) u = rand();
-    while (v === 0) v = rand();
+    while (u === 0) u = rng();
+    while (v === 0) v = rng();
     return media + desviacion * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   }
 
@@ -60,6 +72,11 @@
 
   /** Selector ponderado O(log n) mediante búsqueda binaria sobre pesos acumulados. */
   function crearSelectorPonderado(items, pesos) {
+    return crearSelectorPonderadoCon(rand, items, pesos);
+  }
+
+  /** Igual que crearSelectorPonderado pero con un PRNG explícito. */
+  function crearSelectorPonderadoCon(rng, items, pesos) {
     const acumulado = [];
     let suma = 0;
     pesos.forEach((p) => {
@@ -67,7 +84,7 @@
       acumulado.push(suma);
     });
     return function () {
-      const r = rand() * suma;
+      const r = rng() * suma;
       let lo = 0;
       let hi = acumulado.length - 1;
       while (lo < hi) {
@@ -162,6 +179,100 @@
     r.id = i + 1;
   });
 
+  /* ---------- Atributos operacionales y trazabilidad temporal -------------- */
+
+  // PRNG independiente: añadir estos campos no cambia los valores originales.
+  const randOp = mulberry32(SEMILLA + 1);
+  const uniforme = (min, max) => min + (max - min) * randOp();
+  const conNulos = (valor, probNulo) => (randOp() < probNulo ? null : valor);
+
+  const COMERCIALIZADORES = [
+    'Distribuidora Central',
+    'Carnes del Valle',
+    'Alimentos Norte',
+    'Cárnicos La Sabana',
+    'Proteínas del Café',
+  ];
+  const SISTEMAS_MEDICION = ['Equipo1', 'Equipo2', 'Equipo3'];
+  const elegirComercializador = crearSelectorPonderadoCon(randOp, COMERCIALIZADORES, [1.4, 1.2, 1.0, 0.8, 0.6]);
+  const elegirSistema = crearSelectorPonderadoCon(randOp, SISTEMAS_MEDICION, [1.0, 0.8, 0.5]);
+
+  const MIN_MS = 60 * 1000;
+
+  /** Formatea epoch-ms como 'YYYY-MM-DD HH:mm:ss' (hora local). */
+  function formatearTimestamp(ms) {
+    const d = new Date(ms);
+    return `${isoDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  /** Parsea 'YYYY-MM-DD HH:mm:ss' (hora local) a epoch-ms; null si no es válido. */
+  function parsearTimestamp(valor) {
+    if (valor == null || valor === '') return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(String(valor));
+    if (!m) return null;
+    const ms = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime();
+    return Number.isNaN(ms) ? null : ms;
+  }
+
+  /**
+   * Diferencia entre ingreso a planta y sacrificio de un registro.
+   * Devuelve { tiempo_espera_sacrificio_min (int), tiempo_espera_sacrificio_horas (float 2 dec.) };
+   * ambos null si falta (o es inválida) cualquiera de las dos fechas.
+   */
+  function calcularTiempoEsperaSacrificio(registro) {
+    const ingreso = parsearTimestamp(registro && registro.fecha_ingreso_planta);
+    const sacrificio = parsearTimestamp(registro && registro.fecha_sacrificio);
+    if (ingreso === null || sacrificio === null) {
+      return { tiempo_espera_sacrificio_min: null, tiempo_espera_sacrificio_horas: null };
+    }
+    const minutos = Math.round((sacrificio - ingreso) / MIN_MS);
+    return {
+      tiempo_espera_sacrificio_min: minutos,
+      tiempo_espera_sacrificio_horas: redondear(minutos / 60, 2),
+    };
+  }
+
+  /** Recalcula y escribe en el propio registro los campos de tiempo de espera. */
+  function aplicarTiempoEsperaSacrificio(registro) {
+    return Object.assign(registro, calcularTiempoEsperaSacrificio(registro));
+  }
+
+  for (const r of registros) {
+    // Línea de tiempo coherente: ingreso (día del registro) → pesaje en pie → sacrificio → canal caliente / fría
+    const [y, mo, d] = r.fecha.split('-').map(Number);
+    const horaIngreso = clamp(normal(7.5, 2.0, randOp), 3, 15);
+    const tIngreso = new Date(y, mo - 1, d).getTime() + Math.round(horaIngreso * 60) * MIN_MS + Math.floor(randOp() * 60) * 1000;
+    const tPesajePie = tIngreso + Math.round(uniforme(15, 45)) * MIN_MS + Math.floor(randOp() * 60) * 1000;
+    const tSacrificio = tIngreso + Math.round(clamp(normal(8, 3.5, randOp), 1.5, 20) * 60) * MIN_MS + Math.floor(randOp() * 60) * 1000;
+    const tCaliente = tSacrificio + Math.round(uniforme(20, 50)) * MIN_MS + Math.floor(randOp() * 60) * 1000;
+    const tFria = tSacrificio + Math.round(uniforme(2, 24) * 60) * MIN_MS + Math.floor(randOp() * 60) * 1000;
+
+    // Pesos: canal fría = caliente menos la merma por oreo (2-6 %)
+    const pesoCaliente = redondear(clamp(normal(107.5, 3.5, randOp), 100, 115), 1);
+    const pesoFria = redondear(clamp(pesoCaliente * (1 - uniforme(0.02, 0.06)), 90, 108), 1);
+
+    r.comercializador = conNulos(elegirComercializador(), 0.05);
+    r.color = conNulos(Math.round(clamp(normal(42, 5.5, randOp), 30, 55)), 0.05);
+    r.variacion_color = conNulos(Math.round(clamp(normal(27, 5, randOp), 15, 40)), 0.05);
+    r.sistema_medicion = conNulos(elegirSistema(), 0.05);
+    r.fecha_ingreso_planta = formatearTimestamp(tIngreso);
+    r.fecha_pesaje_pie = conNulos(formatearTimestamp(tPesajePie), 0.03);
+    r.fecha_sacrificio = conNulos(formatearTimestamp(tSacrificio), 0.03);
+    r.peso_canal_caliente_kg = conNulos(pesoCaliente, 0.03);
+    r.fecha_canal_caliente = conNulos(formatearTimestamp(tCaliente), 0.03);
+    r.fecha_canal_fria = conNulos(formatearTimestamp(tFria), 0.03);
+    r.peso_canal_fria_kg = conNulos(pesoFria, 0.03);
+    aplicarTiempoEsperaSacrificio(r);
+  }
+
+  const helpers = {
+    parsearTimestamp,
+    formatearTimestamp,
+    calcularTiempoEsperaSacrificio,
+    aplicarTiempoEsperaSacrificio,
+  };
+  window.calcularTiempoEsperaSacrificio = calcularTiempoEsperaSacrificio;
+
   window.DASHBOARD_DATA = {
     meta: {
       tabla: 'canales',
@@ -173,7 +284,10 @@
     catalogos: {
       plantas: PLANTAS.slice(),
       granjas: GRANJAS.map((g) => ({ nombre: g.nombre, planta: g.planta })),
+      comercializadores: COMERCIALIZADORES.slice(),
+      sistemas_medicion: SISTEMAS_MEDICION.slice(),
     },
     registros,
+    helpers,
   };
 })();
