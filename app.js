@@ -1362,7 +1362,8 @@ App.views.inicio = (function () {
       { key: 'magroProm', label: 'Promedio % magro', align: 'right', render: (r) => U.fmtPct(r.magroProm, 2) },
       { key: 'grasaProm', label: 'Promedio grasa dorsal (mm)', align: 'right', render: (r) => U.fmt(r.grasaProm, 1) },
       { key: 'iqProm', label: 'IQ-Col promedio', align: 'right', render: (r) => U.fmt(r.iqProm, 1) },
-      { key: 'iqTop', label: 'Categoría IQ-Col mayoritaria', defaultDir: 'asc', render: (r) => U.iqBadge(r.iqTop) },
+      // Mismo recuadro que "Cat. SEUROP" del ranking (la clase SEUROP se deriva del IQ-Col)
+      { key: 'iqTop', label: 'Categoría IQ-Col mayoritaria', align: 'center', defaultDir: 'asc', render: (r) => seuropLetterBox(r.iqTop) },
     ];
   }
 
