@@ -1,0 +1,63 @@
+# ==========================================================================
+# .gitignore — Tablero a la medida (sitio estático + Vercel Function)
+# ==========================================================================
+
+# --- Sistema operativo ---------------------------------------------------
+.DS_Store
+.AppleDouble
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- IDE / editores -------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Asistentes de IA (configuración local) -------------------------------
+.claude/
+
+# --- Datos locales pesados o temporales -----------------------------------
+# Snapshots de Aurora / Parquet de prueba (se leen con ?archivo=data/...)
+data/
+*.parquet
+*.csv
+*.tsv
+*.xlsx
+# JSON de pruebas locales; los de configuración del proyecto se conservan
+*.json
+!package.json
+!package-lock.json
+!vercel.json
+!jsconfig.json
+!tsconfig.json
+
+# --- Node / Vercel --------------------------------------------------------
+node_modules/
+.vercel/
+.env
+.env.*
+!.env.example
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Build de SAM / Python (ETL) ------------------------------------------
+.aws-sam/
+__pycache__/
+*.py[cod]
+.venv/
+
+# --- Logs y temporales ----------------------------------------------------
+*.log
+*.tmp
+.cache/
+
+# --- Documentación: siempre versionada ------------------------------------
+!PROJECT_CONTEXT.md
+!README.md
