@@ -9,10 +9,11 @@
  *   4. App.charts      Helpers de ECharts (instancias, tooltip, zoom, vacío)
  *   5. App.components  MultiSelect · DateRange · DataTable
  *   6. App.filters     Estado global de filtros (fuente única) + suscripción
- *   7. App.views       Tablero a la medida · Despacho · Scores (Cosecha + Granja)
+ *   7. App.views       Tablero a la medida · Despacho · Scores (en construcción)
  *   8. Shell + Router  Barra superior de filtros, sidebar y navegación por hash
  *
- * Requiere: mock_data.js (window.DASHBOARD_DATA), ECharts 5 y Lucide (CDN).
+ * Requiere: window.DASHBOARD_DATA (lo publica data_loader.js tras descargar y
+ *           validar el Parquet de S3), seurop_quartiles.js, ECharts 5 y Lucide (CDN).
  * ========================================================================== */
 window.App = window.App || {};
 
@@ -303,7 +304,7 @@ App.data = (function () {
   const U = App.utils;
   const source = window.DASHBOARD_DATA;
   if (!source || !Array.isArray(source.registros)) {
-    throw new Error('window.DASHBOARD_DATA no está disponible: mock_data.js debe cargarse antes que app.js.');
+    throw new Error('window.DASHBOARD_DATA no está disponible: data_loader.js debe cargar los datos antes que app.js.');
   }
 
   const records = source.registros;
@@ -343,16 +344,33 @@ App.data = (function () {
     return out;
   }
 
-  const createAcc = (key) => ({ key, n: 0, peso: 0, magro: 0, grasa: 0, iq: 0, seu: [0, 0, 0, 0, 0, 0], iqc: [0, 0, 0, 0, 0, 0] });
+  const createAcc = (key) => ({ key, n: 0, peso: 0, peso2: 0, magro: 0, grasa: 0, nGrasa: 0, iq: 0, seu: [0, 0, 0, 0, 0, 0], iqc: [0, 0, 0, 0, 0, 0] });
 
   function accumulate(a, r) {
     a.n++;
     a.peso += r.peso_kg;
+    a.peso2 += r.peso_kg * r.peso_kg; // Σx² para la desviación estándar del peso
     a.magro += r.porcentaje_magro;
-    a.grasa += r.grasa_dorsal_mm;
+    // La grasa dorsal es opcional en el origen: los nulos no cuentan en su promedio
+    if (Number.isFinite(r.grasa_dorsal_mm)) {
+      a.grasa += r.grasa_dorsal_mm;
+      a.nGrasa++;
+    }
     a.iq += r.iq_col;
     a.seu[r._seu]++;
     a.iqc[r._iq]++;
+  }
+
+  /**
+   * CV del peso = σ / μ × 100, con σ muestral (n − 1) como en U.standardDeviation.
+   * NaN con menos de 2 canales (σ no definida); 0 si todos los pesos son iguales.
+   */
+  function cvPeso(a) {
+    if (a.n < 2 || !(a.peso > 0)) return NaN;
+    const mean = a.peso / a.n;
+    const variance = Math.max(0, (a.peso2 - a.n * mean * mean) / (a.n - 1)); // max: ruido de redondeo
+    const sd = Math.sqrt(variance);
+    return sd < 1e-9 ? 0 : (sd / mean) * 100;
   }
 
   function finalize(a) {
@@ -361,8 +379,9 @@ App.data = (function () {
       key: a.key,
       count: n,
       pesoProm: n ? a.peso / n : NaN,
+      cvPeso: cvPeso(a),
       magroProm: n ? a.magro / n : NaN,
-      grasaProm: n ? a.grasa / n : NaN,
+      grasaProm: a.nGrasa ? a.grasa / a.nGrasa : NaN,
       iqProm: n ? a.iq / n : NaN,
       seu: a.seu,
       iqc: a.iqc,
@@ -1144,7 +1163,7 @@ App.views.inicio = (function () {
       </div>
 
       <section class="card mb-6">
-        ${cardHeader('Ranking por granja', 'Ordenado por cantidad de canales · haga clic en un encabezado para reordenar')}
+        ${cardHeader('Ranking por granja', 'Ordenado por cantidad de canales · CV peso = σ / μ × 100 · haga clic en un encabezado para reordenar')}
         <div class="px-2 pb-2 md:px-3" data-ref="tableRanking"></div>
       </section>
 
@@ -1339,6 +1358,16 @@ App.views.inicio = (function () {
           `<div class="bar-cell"><div class="bar-track"><div class="bar-fill" style="width:${(r.share * 100).toFixed(1)}%"></div></div><span class="font-bold">${U.fmt(r.count)}</span></div>`,
       },
       { key: 'pesoProm', label: 'Peso promedio (kg)', align: 'right', render: (r) => U.fmt(r.pesoProm, 1) },
+      {
+        key: 'cvPeso',
+        label: 'CV Peso (%)',
+        align: 'right',
+        // Con 1 canal la desviación no está definida: se muestra "—" en lugar de NaN
+        render: (r) =>
+          Number.isFinite(r.cvPeso)
+            ? `<span class="num">${U.fmtPct(r.cvPeso, 2)}</span>`
+            : `<span class="num text-grey-mid" title="Se requieren al menos 2 canales">—</span>`,
+      },
       { key: 'magroProm', label: 'Promedio % magro', align: 'right', render: (r) => U.fmtPct(r.magroProm, 2) },
       { key: 'grasaProm', label: 'Promedio grasa dorsal (mm)', align: 'right', render: (r) => U.fmt(r.grasaProm, 1) },
       { key: 'iqProm', label: 'IQ-Col promedio', align: 'right', render: (r) => U.fmt(r.iqProm, 1) },
@@ -1760,579 +1789,30 @@ App.views.despacho = (function () {
 })();
 
 /* --------------------------------------------------------------------------
- * 7.3 SCORES — usa los filtros globales (fechas, planta, granja y la
- *     granularidad para los ejes temporales).
- *
- *   Score Cosecha  5 scorecards · ranking de granjas con completitud y CV de
- *                  peso · distribución SEUROP (%) · peso promedio vs. CV en el
- *                  tiempo con tabla periodo × granja sincronizada.
- *   Score Granja   gráfico de barras configurable: Eje X (dimensión) × Eje Y
- *                  (promedio de una métrica).
- *
- * Los nulos se omiten en promedios, desviaciones y conteos distintivos.
+ * 7.3 SCORES — en construcción. La versión anterior (Score Cosecha + Score
+ *     Granja) está en el historial de git (commit 7859625) para retomarla
+ *     cuando el módulo se integre con los datos de S3.
  * ------------------------------------------------------------------------ */
 App.views.scores = (function () {
   'use strict';
-  const T = App.tokens;
-  const U = App.utils;
-  const C = App.charts;
-  const F = App.filters;
-  const { DataTable } = App.components;
-
-  const PAGE_SIZE = 5;
-
-  /** Colores institucionales de la distribución SEUROP de Score Cosecha (orden S → P). */
-  const SEUROP_SCORE_COLORS = ['#2f8f6b', '#48a982', '#c9821f', '#eb5852', '#993935', '#7c2c29'];
-
-  /** Umbrales de completitud de cosecha → estilo del badge. Tinta oscura para contraste AA. */
-  const COMPLETITUD = [
-    { min: 90, cls: 'bg-good-soft', ink: '#1f6b50' },
-    { min: 70, cls: 'bg-warn-soft', ink: '#8a5a12' },
-    { min: -Infinity, cls: 'bg-crit-soft', ink: '#8e2a20' },
-  ];
-
-  /* ---------- Score Granja: dimensiones (Eje X) y métricas (Eje Y) -------- */
-
-  const BIN_KG = 5;
-
-  /**
-   * order: 'value'  → barras de mayor a menor promedio
-   *        'key'    → orden natural de la clave (cronológico o por rango de peso)
-   */
-  const X_DIMENSIONS = {
-    planta: { label: 'Planta', key: (r) => r.planta, text: (k) => k, order: 'value' },
-    periodo: {
-      label: 'Periodo de tiempo',
-      key: (r) => r['_' + F.state.gran],
-      text: (k) => U.periodLabel(F.state.gran, k),
-      order: 'key',
-    },
-    granja: { label: 'Granja', key: (r) => r.granja, text: (k) => k, order: 'value' },
-    peso: {
-      label: 'Rango de peso',
-      key: (r) => (Number.isFinite(r.peso_kg) ? Math.floor(r.peso_kg / BIN_KG) * BIN_KG : null),
-      text: (k) => `${k}–${k + BIN_KG} kg`,
-      order: 'key', // escala ordinal: se mantiene de menor a mayor peso
-    },
-  };
-
-  /** Rendimiento en canal = peso canal caliente / peso × 100 (null si falta un dato). */
-  const rendimiento = (r) =>
-    Number.isFinite(r.peso_canal_caliente_kg) && r.peso_kg > 0 ? (r.peso_canal_caliente_kg / r.peso_kg) * 100 : null;
-
-  const Y_METRICS = {
-    grasa: { label: 'Grasa dorsal promedio', unit: 'mm', dec: 1, value: (r) => r.grasa_dorsal_mm },
-    magro: { label: '% Magro promedio', unit: '%', dec: 2, value: (r) => r.porcentaje_magro },
-    caliente: { label: 'Peso canal caliente promedio', unit: 'kg', dec: 1, value: (r) => r.peso_canal_caliente_kg },
-    rendimiento: { label: 'Rendimiento en canal promedio', unit: '%', dec: 2, value: rendimiento },
-  };
-
-  const fmtUnit = (v, m) => (m.unit === '%' ? U.fmtPct(v, m.dec) : `${U.fmt(v, m.dec)} ${m.unit}`);
-
-  /* ---------- Estado y referencias ---------------------------------------- */
-
-  const state = { x: 'granja', y: 'grasa' };
-  let dirty = false;
-  const ui = {};
-  const charts = {};
-  const tables = {};
-
-  /* ---------- Plantilla ---------------------------------------------------- */
-
-  const kpiCard = (id, label) => `
-    <article class="card min-w-0 p-4">
-      <p class="num truncate font-display text-[1.8rem] font-extrabold leading-tight text-primary" data-ref="kpi-${id}">—</p>
-      <p class="mt-1 text-[0.72rem] font-medium text-grey-strong">${label}</p>
-    </article>`;
-
-  const sectionHeader = (id, title, sub, extra = '') => `
-    <header class="mb-4 flex flex-wrap items-end justify-between gap-3">
-      <div>
-        <h2 id="${id}" class="font-display text-xl font-bold text-primary">${title}</h2>
-        <p class="mt-0.5 text-[0.76rem] text-grey-mid">${sub}</p>
-      </div>${extra}
-    </header>`;
-
-  const cardHeader = (title, sub, subRef = '') => `
-    <div class="card-header"><div>
-      <h3 class="card-title" ${subRef ? `data-ref="${subRef}Title"` : ''}>${title}</h3>
-      <p class="card-subtitle" ${subRef ? `data-ref="${subRef}Sub"` : ''}>${sub}</p>
-    </div></div>`;
-
-  const pillSelect = (axis, label, options, value) => `
-    <label class="flex items-center gap-2">
-      <span class="text-[0.68rem] font-bold uppercase tracking-[0.08em] text-grey-mid">${label}</span>
-      <select class="pill-select rounded-[20px] border border-line bg-surface px-3 py-1.5 text-[0.78rem]" data-axis="${axis}" aria-label="${label}">
-        ${Object.entries(options).map(([k, o]) => `<option value="${k}" ${k === value ? 'selected' : ''}>${o.label}</option>`).join('')}
-      </select>
-    </label>`;
 
   function template() {
     return `
-      <!-- ===== SECCIÓN 1 · SCORE COSECHA ===== -->
-      <section class="mb-10" aria-labelledby="score-cosecha-title">
-        ${sectionHeader('score-cosecha-title', 'Score Cosecha', 'Métricas operativas de cosecha, homogeneidad de peso y cobertura de datos.')}
-
-        <div class="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" aria-label="Indicadores de cosecha">
-          ${kpiCard('canales', 'Canales')}
-          ${kpiCard('sistemas', 'Sistemas de medición')}
-          ${kpiCard('plantas', 'Plantas')}
-          ${kpiCard('comercializadores', 'Comercializadores')}
-          ${kpiCard('granjas', 'Granjas')}
-        </div>
-
-        <div class="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-12">
-          <article class="card min-w-0 xl:col-span-7">
-            ${cardHeader('Ranking de granjas y cobertura operativa', 'Ordenado por canales · completitud = canales con fecha de ingreso a planta · CV = σ / μ × 100')}
-            <div class="px-2 pb-2 md:px-3" data-ref="tableRanking"></div>
-          </article>
-          <article class="card flex min-w-0 flex-col xl:col-span-5">
-            ${cardHeader('Distribución SEUROP (%)', 'Participación de cada categoría sobre los canales filtrados')}
-            <div class="flex-1 px-3 pb-3 md:px-4"><div data-ref="chartSeurop" style="height:320px"></div></div>
-          </article>
-        </div>
-
-        <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          <article class="card min-w-0">
-            ${cardHeader('Peso promedio vs. CV de peso', '', 'pesoCv')}
-            <div class="px-3 pb-3 md:px-4"><div data-ref="chartPesoCv" style="height:340px"></div></div>
-          </article>
-          <article class="card min-w-0">
-            ${cardHeader('Detalle por periodo y granja', 'Pase el cursor por una fila para ubicar el periodo en el gráfico')}
-            <div class="px-2 pb-2 md:px-3" data-ref="tablePeriodos"></div>
-          </article>
-        </div>
-      </section>
-
-      <!-- ===== SECCIÓN 2 · SCORE GRANJA ===== -->
-      <section aria-labelledby="score-granja-title">
-        ${sectionHeader(
-          'score-granja-title',
-          'Score Granja',
-          'Análisis comparativo bidimensional configurable.',
-          `<div class="flex flex-wrap items-center gap-3" role="group" aria-label="Configuración del gráfico comparativo" data-ref="selectors">
-            ${pillSelect('x', 'Eje X', X_DIMENSIONS, state.x)}
-            ${pillSelect('y', 'Eje Y', Y_METRICS, state.y)}
-          </div>`
-        )}
-        <article class="card min-w-0">
-          ${cardHeader('', '', 'comparativo')}
-          <div class="px-3 pb-3 md:px-4"><div data-ref="chartComparativo" style="height:380px"></div></div>
-        </article>
-      </section>`;
-  }
-
-  /* ---------- Montaje ------------------------------------------------------ */
-
-  function mount(container) {
-    container.innerHTML = template();
-    container.querySelectorAll('[data-ref]').forEach((n) => (ui[n.dataset.ref] = n));
-
-    // Datos y granularidad afectan esta vista (ejes temporales)
-    F.subscribe(() => {
-      if (container.hidden) dirty = true;
-      else update();
-    });
-
-    // Selectores de Score Granja: solo redibujan el comparativo
-    ui.selectors.addEventListener('change', (e) => {
-      const axis = e.target.dataset.axis;
-      if (!axis) return;
-      state[axis] = e.target.value;
-      renderComparativo(F.rows());
-    });
-
-    charts.seurop = C.create(ui.chartSeurop);
-    charts.pesoCv = C.create(ui.chartPesoCv);
-    charts.comparativo = C.create(ui.chartComparativo);
-
-    tables.ranking = new DataTable(ui.tableRanking, {
-      columns: rankingColumns(),
-      sortKey: 'count',
-      sortDir: 'desc',
-      pageSize: PAGE_SIZE,
-      pagerStyle: 'simple',
-      striped: true,
-      unit: 'granjas',
-    });
-
-    tables.periodos = new DataTable(ui.tablePeriodos, {
-      columns: periodColumns(),
-      sortKey: 'periodo',
-      sortDir: 'asc',
-      pageSize: PAGE_SIZE,
-      pagerStyle: 'simple',
-      striped: true,
-      compact: true,
-      unit: 'filas',
-      onRowHover: highlightPeriod,
-    });
-
-    update();
-  }
-
-  /* ---------- Cálculo (una pasada por la selección filtrada) -------------- */
-
-  /** Grupo con los pesos válidos y conteo de completitud. */
-  function bucket(map, key, extra) {
-    let g = map.get(key);
-    if (!g) {
-      g = { key, n: 0, conIngreso: 0, pesos: [], ...extra };
-      map.set(key, g);
-    }
-    return g;
-  }
-
-  function addTo(g, r) {
-    g.n++;
-    if (r.fecha_ingreso_planta != null && r.fecha_ingreso_planta !== '') g.conIngreso++;
-    if (Number.isFinite(r.peso_kg)) g.pesos.push(r.peso_kg);
-  }
-
-  const summarize = (g) => ({
-    key: g.key,
-    count: g.n,
-    completitud: g.n ? (g.conIngreso / g.n) * 100 : NaN,
-    pesoProm: U.mean(g.pesos),
-    cv: U.coefficientOfVariation(g.pesos),
-  });
-
-  function computeCosecha(rows, gran) {
-    const field = '_' + gran;
-    const sistemas = new Set();
-    const plantas = new Set();
-    const comercializadores = new Set();
-    const granjas = new Set();
-    const seu = [0, 0, 0, 0, 0, 0];
-    const byGranja = new Map();
-    const byPeriodo = new Map();
-    const byPeriodoGranja = new Map();
-
-    for (const r of rows) {
-      if (r.sistema_medicion != null) sistemas.add(r.sistema_medicion);
-      if (r.planta != null) plantas.add(r.planta);
-      if (r.comercializador != null) comercializadores.add(r.comercializador);
-      if (r.granja != null) granjas.add(r.granja);
-      seu[r._seu]++;
-
-      addTo(bucket(byGranja, r.granja, { planta: r.planta }), r);
-      addTo(bucket(byPeriodo, r[field]), r);
-      addTo(bucket(byPeriodoGranja, `${r[field]}|${r.granja}`, { periodo: r[field], granja: r.granja }), r);
-    }
-
-    const periodosOrdenados = [...byPeriodo.values()]
-      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-      .map((g, idx) => Object.assign(summarize(g), { idx }));
-    const idxByPeriodo = new Map(periodosOrdenados.map((p) => [p.key, p.idx]));
-
-    return {
-      total: rows.length,
-      distinct: { sistemas: sistemas.size, plantas: plantas.size, comercializadores: comercializadores.size, granjas: granjas.size },
-      seu,
-      granjas: [...byGranja.values()].map((g) => Object.assign(summarize(g), { planta: g.planta })),
-      periodos: periodosOrdenados,
-      periodoGranja: [...byPeriodoGranja.values()].map((g) =>
-        Object.assign(summarize(g), { periodo: g.periodo, granja: g.granja, periodIdx: idxByPeriodo.get(g.periodo) })
-      ),
-    };
-  }
-
-  function update() {
-    dirty = false;
-    const rows = F.rows();
-    const data = computeCosecha(rows, F.state.gran);
-
-    renderKpis(data);
-    tables.ranking.setRows(data.granjas);
-    renderSeurop(data);
-
-    renderPesoCv(data.periodos);
-    tables.periodos.setColumns(periodColumns());
-    tables.periodos.setRows(data.periodoGranja);
-
-    renderComparativo(rows);
-  }
-
-  /* ---------- Scorecards --------------------------------------------------- */
-
-  function renderKpis(data) {
-    ui['kpi-canales'].textContent = U.fmt(data.total);
-    ui['kpi-sistemas'].textContent = U.fmt(data.distinct.sistemas);
-    ui['kpi-plantas'].textContent = U.fmt(data.distinct.plantas);
-    ui['kpi-comercializadores'].textContent = U.fmt(data.distinct.comercializadores);
-    ui['kpi-granjas'].textContent = U.fmt(data.distinct.granjas);
-  }
-
-  /* ---------- Tablas ------------------------------------------------------- */
-
-  function completitudBadge(v) {
-    if (!Number.isFinite(v)) return '—';
-    const c = COMPLETITUD.find((x) => v >= x.min);
-    return `<span class="badge num ${c.cls}" style="color:${c.ink}">${U.fmtPct(v, 1)}</span>`;
-  }
-
-  function rankingColumns() {
-    return [
-      {
-        key: 'key',
-        label: 'Granja',
-        type: 'text',
-        render: (r) => `<div class="font-semibold text-ink">${U.escapeHtml(r.key)}</div><div class="text-xs text-grey-mid">${U.escapeHtml(r.planta)}</div>`,
-      },
-      { key: 'count', label: 'Canales', align: 'right', render: (r) => `<span class="num font-bold">${U.fmt(r.count)}</span>` },
-      { key: 'completitud', label: 'Completitud cosecha (%)', align: 'right', render: (r) => completitudBadge(r.completitud) },
-      { key: 'pesoProm', label: 'Peso promedio (kg)', align: 'right', render: (r) => `<span class="num">${U.fmt(r.pesoProm, 1)}</span>` },
-      { key: 'cv', label: 'CV peso (%)', align: 'right', render: (r) => `<span class="num">${U.fmt(r.cv, 2)}</span>` },
-    ];
-  }
-
-  function periodColumns() {
-    const gran = F.state.gran;
-    return [
-      {
-        key: 'periodo',
-        label: `Fecha / Periodo (${U.granLabel(gran)})`,
-        type: 'text',
-        // Cronológico y, dentro del periodo, por granja
-        sortValue: (r) => `${r.periodo}|${r.granja}`,
-        render: (r) => `<span class="font-semibold">${U.periodLabel(gran, r.periodo)}</span>`,
-      },
-      { key: 'granja', label: 'Granja', type: 'text', render: (r) => U.escapeHtml(r.granja) },
-      { key: 'count', label: 'Canales', align: 'right', render: (r) => `<span class="num">${U.fmt(r.count)}</span>` },
-      { key: 'pesoProm', label: 'Peso promedio (kg)', align: 'right', render: (r) => `<span class="num">${U.fmt(r.pesoProm, 1)}</span>` },
-      { key: 'cv', label: 'CV peso (%)', align: 'right', render: (r) => `<span class="num">${U.fmt(r.cv, 2)}</span>` },
-    ];
-  }
-
-  /** Hover en la tabla → tooltip del mismo periodo en el gráfico peso vs. CV. */
-  function highlightPeriod(row) {
-    if (!row) return charts.pesoCv.dispatchAction({ type: 'hideTip' });
-    charts.pesoCv.dispatchAction({ type: 'showTip', seriesIndex: 0, dataIndex: row.periodIdx });
-  }
-
-  /* ---------- Gráfica 1 · Distribución SEUROP (%) ------------------------- */
-
-  function renderSeurop(data) {
-    if (!data.total) return C.setEmpty(charts.seurop);
-    const pct = data.seu.map((n) => (n / data.total) * 100);
-
-    charts.seurop.setOption(
-      {
-        textStyle: C.textStyle,
-        animationDuration: 450,
-        grid: { left: 4, right: 8, top: 24, bottom: 4, containLabel: true },
-        tooltip: {
-          ...C.tooltip,
-          trigger: 'item',
-          formatter: (p) =>
-            C.tipHeader(p.name) +
-            C.tipRow(p.color, 'Canales', U.fmt(data.seu[p.dataIndex])) +
-            C.tipRow(p.color, '% del total', U.fmtPct(p.value, 2)),
-        },
-        xAxis: { ...C.categoryAxis(U.SEUROP.map((s) => s.key)), axisLabel: { color: C.AXIS.label, interval: 0, fontSize: 11 } },
-        yAxis: {
-          type: 'value',
-          min: 0,
-          max: 100,
-          interval: 25,
-          axisLabel: { color: C.AXIS.label, formatter: '{value}%' },
-          splitLine: { lineStyle: { color: C.AXIS.split } },
-        },
-        series: [
-          {
-            name: 'Distribución SEUROP',
-            type: 'bar',
-            barMaxWidth: 46,
-            data: pct.map((v, i) => ({ value: v, itemStyle: { color: SEUROP_SCORE_COLORS[i], borderRadius: [4, 4, 0, 0] } })),
-            label: { show: true, position: 'top', color: T.ink, fontWeight: 700, fontSize: 11, formatter: (p) => U.fmtPct(p.value) },
-          },
-        ],
-      },
-      true
-    );
-  }
-
-  /* ---------- Gráfica 2 · Peso promedio (barras) vs. CV (línea) ----------- */
-
-  function renderPesoCv(P) {
-    const gran = F.state.gran;
-    ui.pesoCvSub.textContent = `Agrupado por ${U.granLabel(gran).toLowerCase()} · barras: peso canal promedio (kg) · línea: coeficiente de variación del peso (%)`;
-    if (!P.length) return C.setEmpty(charts.pesoCv);
-
-    const labels = P.map((p) => U.periodLabel(gran, p.key));
-    const zoom = C.zoomFor(P.length);
-
-    charts.pesoCv.setOption(
-      {
-        textStyle: C.textStyle,
-        animationDuration: 450,
-        legend: { ...C.legend, data: ['Peso promedio (kg)', 'CV peso (%)'] },
-        grid: { left: 4, right: 4, top: 56, bottom: zoom ? 44 : 4, containLabel: true },
-        tooltip: {
-          ...C.tooltip,
-          trigger: 'axis',
-          axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(153,57,53,.06)' } },
-          formatter: (params) => {
-            const p = P[params[0].dataIndex];
-            return (
-              C.tipHeader(labels[p.idx], `${U.fmt(p.count)} canales`) +
-              C.tipRow(T.primary, 'Peso promedio', `${U.fmt(p.pesoProm, 1)} kg`) +
-              C.tipRow(T.accent, 'CV peso', U.fmtPct(p.cv, 2))
-            );
-          },
-        },
-        xAxis: C.categoryAxis(labels),
-        yAxis: [
-          {
-            type: 'value',
-            name: 'Peso (kg)',
-            nameTextStyle: { color: C.AXIS.name, align: 'left', fontWeight: 600 },
-            // Ajustado al rango (como en el tablero) para que la variación sea legible
-            min: (v) => (Number.isFinite(v.min) ? Math.max(0, Math.floor((v.min - 6) / 5) * 5) : 0),
-            max: (v) => (Number.isFinite(v.max) ? Math.ceil((v.max + 2) / 5) * 5 : 130),
-            axisLabel: { color: C.AXIS.label },
-            splitLine: { lineStyle: { color: C.AXIS.split } },
-          },
-          {
-            type: 'value',
-            name: 'CV (%)',
-            nameTextStyle: { color: C.AXIS.name, align: 'right', fontWeight: 600 },
-            position: 'right',
-            min: 0,
-            max: (v) => (Number.isFinite(v.max) ? Math.ceil(v.max * 1.25) : 20),
-            axisLabel: { color: C.AXIS.label, formatter: '{value}%' },
-            splitLine: { show: false },
-          },
-        ],
-        dataZoom: zoom || [],
-        series: [
-          {
-            name: 'Peso promedio (kg)',
-            type: 'bar',
-            yAxisIndex: 0,
-            barMaxWidth: 34,
-            itemStyle: { color: T.primarySoft, borderColor: T.primary, borderWidth: 1, borderRadius: [4, 4, 0, 0] },
-            emphasis: { itemStyle: { color: '#ebd3d1' } },
-            data: P.map((p) => +p.pesoProm.toFixed(2)),
-          },
-          {
-            name: 'CV peso (%)',
-            type: 'line',
-            yAxisIndex: 1,
-            smooth: 0.3,
-            symbol: 'circle',
-            symbolSize: 8,
-            showSymbol: P.length <= 60,
-            lineStyle: { width: 2.5, color: T.accent },
-            itemStyle: { color: T.accent, borderColor: '#fff', borderWidth: 2 },
-            emphasis: { focus: 'series' },
-            data: P.map((p) => (Number.isFinite(p.cv) ? +p.cv.toFixed(2) : null)),
-          },
-        ],
-      },
-      true
-    );
-  }
-
-  /* ---------- Score Granja · comparativo dinámico ------------------------- */
-
-  function computeComparativo(rows) {
-    const dim = X_DIMENSIONS[state.x];
-    const met = Y_METRICS[state.y];
-    const groups = new Map();
-    let omitidos = 0;
-
-    for (const r of rows) {
-      const k = dim.key(r);
-      if (k === null || k === undefined) continue;
-      let g = groups.get(k);
-      if (!g) {
-        g = { key: k, n: 0, values: [] };
-        groups.set(k, g);
-      }
-      g.n++;
-      const v = met.value(r);
-      if (Number.isFinite(v)) g.values.push(v);
-      else omitidos++;
-    }
-
-    const list = [...groups.values()]
-      .map((g) => ({ key: g.key, label: dim.text(g.key), n: g.n, valid: g.values.length, avg: U.mean(g.values) }))
-      .filter((g) => Number.isFinite(g.avg));
-
-    if (dim.order === 'key') list.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    else list.sort((a, b) => b.avg - a.avg);
-
-    return { dim, met, list, omitidos };
-  }
-
-  function renderComparativo(rows) {
-    const { dim, met, list, omitidos } = computeComparativo(rows);
-
-    ui.comparativoTitle.textContent = `${met.label} por ${dim.label.toLowerCase()}`;
-    const orden = dim.order === 'value' ? 'de mayor a menor' : state.x === 'periodo' ? 'orden cronológico' : 'de menor a mayor peso';
-    ui.comparativoSub.textContent =
-      `${U.fmt(list.length)} grupos · ${orden}` + (omitidos ? ` · ${U.fmt(omitidos)} canales sin dato omitidos` : '');
-
-    if (!list.length) return C.setEmpty(charts.comparativo);
-
-    const labels = list.map((g) => g.label);
-    const zoom = state.x === 'periodo' ? C.zoomFor(list.length) : null;
-    const showLabels = list.length <= 24;
-    // Etiquetas largas (granjas) en dos líneas en lugar de ocultarse
-    const slot = Math.floor((charts.comparativo.getWidth() - 90) / list.length) - 6;
-    const axisLabel =
-      state.x === 'periodo'
-        ? { color: C.AXIS.label, hideOverlap: true }
-        : { color: C.AXIS.label, interval: 0, width: Math.max(48, slot), overflow: 'break', lineHeight: 14 };
-
-    charts.comparativo.setOption(
-      {
-        textStyle: C.textStyle,
-        animationDuration: 400,
-        grid: { left: 4, right: 8, top: showLabels ? 28 : 16, bottom: zoom ? 44 : 4, containLabel: true },
-        tooltip: {
-          ...C.tooltip,
-          trigger: 'item',
-          formatter: (p) => {
-            const g = list[p.dataIndex];
-            return (
-              C.tipHeader(U.escapeHtml(g.label), `${U.fmt(g.valid)} canales con dato`) +
-              C.tipRow(T.primary, met.label, fmtUnit(g.avg, met))
-            );
-          },
-        },
-        xAxis: { ...C.categoryAxis(labels), axisLabel },
-        yAxis: {
-          type: 'value',
-          name: met.unit === '%' ? '%' : met.unit,
-          nameTextStyle: { color: C.AXIS.name, fontWeight: 600 },
-          axisLabel: { color: C.AXIS.label },
-          splitLine: { lineStyle: { color: C.AXIS.split } },
-        },
-        dataZoom: zoom || [],
-        series: [
-          {
-            name: met.label,
-            type: 'bar',
-            barMaxWidth: 48,
-            itemStyle: { color: T.primary, borderRadius: [4, 4, 0, 0] },
-            emphasis: { itemStyle: { color: T.primaryD } },
-            label: { show: showLabels, position: 'top', color: T.ink, fontWeight: 700, fontSize: 11, formatter: (p) => U.fmt(p.value, met.dec) },
-            data: list.map((g) => +g.avg.toFixed(4)),
-          },
-        ],
-      },
-      true
-    );
+      <div class="mx-auto mt-6 max-w-lg rounded-[18px] border border-line bg-white p-8 text-center shadow-card">
+        <span class="inline-block rounded-full bg-warn-soft px-3 py-1 text-xs font-bold uppercase text-warn">Próximamente</span>
+        <span class="mx-auto mt-6 grid h-14 w-14 place-items-center rounded-2xl bg-primary-soft text-primary">
+          <i data-lucide="construction" class="h-7 w-7"></i>
+        </span>
+        <h2 class="mt-5 font-display text-xl font-extrabold tracking-tight text-ink">Módulo de Scores</h2>
+        <p class="mt-2 text-sm leading-relaxed text-grey-strong">
+          Esta sección se encuentra actualmente en fase de integración y estará disponible en una próxima versión.
+        </p>
+      </div>`;
   }
 
   return {
-    mount,
-    onShow() {
-      if (dirty) update();
-      // Al entrar a la pestaña, los gráficos ocupan el ancho completo del contenedor
-      Object.values(charts).forEach((c) => c.resize());
+    mount(container) {
+      container.innerHTML = template();
     },
   };
 })();
