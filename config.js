@@ -38,5 +38,14 @@ window.APP_CONFIG = Object.freeze({
   DEFAULT_COUNTRY: 'Colombia',
 
   /** Renombrado de columnas del Parquet → esquema del tablero. Ej.: { peso_canal: 'peso_kg' } */
-  COLUMN_MAP: {},
+  COLUMN_MAP: {
+    'pesocanal': 'peso_kg',
+    'grasadorsalmm': 'grasa_dorsal_mm',
+    'magropor' : 'porcentaje_magro',
+    'iq_seurop_puntos' : 'puntaje_seurop',
+    'sistemademedicion' : 'sistema_medicion',
+    'pesoenpie' : 'peso_en_pie',
+    'clasepesocanal' : 'clase_peso_canal',
+    'clasificacion_seurop' : 'clasificacion_seurop_origen'   
+  },
 });
