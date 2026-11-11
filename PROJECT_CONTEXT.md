@@ -32,6 +32,22 @@ Aurora PostgreSQL ──export──▶ S3 (Parquet, bucket privado)
 
 El navegador **no** puede leer una ruta `s3://` ni debe tener credenciales de AWS. La Function firma URLs de corta duración (5 min por defecto) y el navegador descarga el Parquet directamente desde S3. El resultado se guarda en IndexedDB y solo se vuelve a descargar cuando cambia el `ETag`; si S3 no responde, se muestra la última copia guardada con un aviso.
 
+### Abstracción de la ruta S3
+
+La ubicación del bucket solo existe en `config.js` (`S3_DATA_URL`, como referencia) y en la variable de entorno `S3_DATA_URL` de la Function. Ningún texto visible la muestra:
+
+- El sidebar indica solo el estado de la fuente: **"Datos en línea"**, **"Copia guardada"** (sin conexión) o **"Archivo local de prueba"** (`?archivo=`).
+- `/api/canales` no devuelve el bucket ni la ruta; sus mensajes de error tampoco. El detalle completo queda solo en los logs de Vercel.
+- El estado de carga y los mensajes de error no citan rutas ni dominios de S3, y el loader no imprime la fuente en consola.
+
+Límite: las URLs firmadas que descarga el navegador llevan el nombre del bucket y se ven en la pestaña **Network** de DevTools. Es inherente a descargar desde S3. Además, `config.js` es un archivo público del sitio.
+
+### Estado de carga
+
+Mientras se consulta la API, se descargan y se procesan los archivos, una capa centrada cubre el contenido (`[data-status="loading"]` en `index.html`): spinner `animate-spin` en `--color-primary` y el mensaje en `text-sm font-medium text-grey-strong`.
+
+Los mensajes avanzan por etapas: "Cargando información del sistema..." → "Obteniendo datos..." (con "n de m" si hay varios archivos) → "Procesando datos..." → "Preparando el tablero...". Al terminar, la capa se desvanece en 300 ms (`hideStatus()` en `data_loader.js`) y cada vista entra con una animación suave (`@keyframes view-in`), desactivada con `prefers-reduced-motion`.
+
 ---
 
 ## 2. Estructura de archivos
@@ -42,9 +58,9 @@ El navegador **no** puede leer una ruta `s3://` ni debe tener credenciales de AW
 | `config.js` | `window.APP_CONFIG`: ubicación S3 (`S3_DATA_URL`), endpoint de la API (`DATA_API_URL`), tiempo límite, zona horaria, país por defecto y `COLUMN_MAP`. |
 | `auth_config.js` | `window.ALLOWED_EMAILS`: correos con acceso. |
 | `auth.js` | Gatekeeper: muestra el login o la app, guarda la sesión (`auth_user`), pinta el correo en el sidebar y gestiona "Cerrar sesión". Expone `window.Auth`. |
-| `data_utils.js` | Helpers de fechas compartidos (`parsearTimestamp`, `calcularTiempoEsperaSacrificio`…). |
+| `data_utils.js` | `window.DataUtils`: cálculo del tiempo de espera ingreso → sacrificio (`calcularTiempoEsperaSacrificio`, `aplicarTiempoEsperaSacrificio`). |
 | `seurop_quartiles.js` | Cuartiles Q25/Q75 por país y año para el IQ-Col (generado; no editar a mano). |
-| `data_loader.js` | Módulo ES: espera la sesión, `loadDataFromS3()`, caché IndexedDB, validación/saneamiento y carga de `app.js`. |
+| `data_loader.js` | Módulo ES: espera la sesión, `loadDataFromS3()`, caché IndexedDB, validación/saneamiento, estados de carga y error, y carga de `app.js`. |
 | `app.js` | Lógica de la SPA: tokens JS, dominio (SEUROP, IQ-Col), agregación, ECharts, filtros globales, vistas y router. |
 | `api/canales.js` | Vercel Function (Node.js): resuelve el archivo o prefijo en S3 y devuelve URLs firmadas. |
 | `package.json` | Dependencias de la Function (`@aws-sdk/*`, OIDC de Vercel). El front no necesita instalación. |
@@ -56,11 +72,33 @@ El navegador **no** puede leer una ruta `s3://` ni debe tener credenciales de AW
 
 | Ruta | Contenido |
 |---|---|
-| `#inicio` | KPIs, distribución SEUROP, **Ranking por granja** (incluye CV Peso), SEUROP en el tiempo y evolución de variables físicas. |
+| `#inicio` | KPIs, distribución SEUROP, **Ranking por granja** (paginado de 10 en 10, con posición `#` y CV Peso), SEUROP en el tiempo y evolución de variables físicas. |
 | `#despacho` | Dispersión peso vs. % magro por clase SEUROP y detalle paginado de canales. |
 | `#scores` | En construcción ("Próximamente"). La versión anterior está en el commit `7859625`. |
 
 Los filtros del header (fechas, planta, granja, granularidad) viven en `App.filters`; cada vista se suscribe y se recalcula en tiempo real sobre los registros cargados desde S3.
+
+### Granja operativa (clave compuesta Planta - Granja)
+
+Una **granja operativa** es la relación entre una planta y una granja: `` `${planta} - ${granja}` `` (`App.data.granjaKey`). Si la misma granja entrega a tres plantas, cuenta como **tres** granjas operativas. Con el dataset actual hay **294 combinaciones** planta - granja (62 nombres de granja distintos).
+
+- `data_loader.js` arma `catalogos.granjas` con una entrada por cada par planta/granja; `app.js` le añade `key` y lo ordena por planta y luego por granja.
+- Cada registro recibe `_gk` (la clave compuesta). El filtro de granjas (`App.filters.state.granjas`) guarda **claves compuestas**, no nombres.
+- El KPI "Granjas activas" muestra cuántas granjas operativas tienen canales en la selección, sobre el total del catálogo (`de N granjas operativas`).
+- El **Ranking por granja** tiene una fila por granja operativa: nombre de la granja con su planta debajo.
+
+### Ranking por granja: paginación e índice
+
+- **10 granjas por página** (`RANKING_PAGE_SIZE` en `App.views.inicio`). La paginación inferior usa la variante `pagerStyle: 'simple'` de `DataTable`: "‹ Anterior", "Página X de Y", "Siguiente ›" y el rango "1–10 de N granjas", dentro de un contenedor `rounded-[20px] border border-line bg-surface`.
+- **Columna `#`** (primera a la izquierda, no ordenable): la posición según el orden activo (por defecto, más canales primero). Continúa entre páginas: `((paginaActual − 1) × 10) + índice + 1`, así que la página 2 va de 11 a 20. `DataTable` pasa esa posición como segundo argumento de `render(row, pos)`.
+- Al reordenar o cambiar un filtro, la tabla vuelve a la página 1 y la numeración se recalcula.
+
+### Filtro de granjas (multiselect agrupado)
+
+- Las opciones se agrupan por planta. Cada planta tiene una cabecera (`bg-surface text-primary`) con una casilla que marca o desmarca todas sus granjas, con estado indeterminado si solo hay algunas, y el conteo `seleccionadas/total`.
+- Las granjas aparecen indentadas bajo su planta.
+- La búsqueda filtra por nombre de granja o de planta. "Seleccionar todo" / "Limpiar" y la casilla de cada planta actúan sobre las opciones visibles.
+- Al cambiar el filtro de plantas, la lista de granjas se restringe a esas plantas y conserva las selecciones previas.
 
 ---
 
@@ -105,7 +143,7 @@ Cada fila del Parquet (una canal) se convierte en un objeto. Los nombres de colu
 
 ### Campos derivados en `app.js`
 
-`iq_col`, `clasificacion_seurop`, `_iq`, `_seu` y las claves de periodo `_dia`, `_semana`, `_mes`, `_trimestre`, `_anio`.
+`iq_col`, `clasificacion_seurop`, `_iq`, `_seu`, la clave de granja operativa `_gk` (`'Planta - Granja'`) y las claves de periodo `_dia`, `_semana`, `_mes`, `_trimestre`, `_anio`.
 
 ---
 
@@ -134,9 +172,11 @@ Rangos de peso: `bajo` (< 60), `a.60<=70kg`, `b.>70<=80kg`, `c.>80<=90kg`, `d.>9
 | O · Menos bueno | 13,32 – < 43,44 |
 | P · Baja | < 13,32 |
 
-En el ranking, "Cat. SEUROP" es la clase predominante (moda) de la granja.
+En el ranking, "Cat. SEUROP" es la clase predominante (moda) de la granja operativa.
 
 ### CV Peso (%) — Ranking por granja
+
+Se calcula por granja operativa (planta - granja).
 
 ```
 CV = Stdev(peso_kg) / Avg(peso_kg) × 100
@@ -226,6 +266,7 @@ aws s3api put-bucket-cors --bucket aws-athena-query-results-234988943857-us-east
 | "S3 rechazó la descarga (403)" | URL firmada vencida (reintentar), falta `s3:GetObject` o `kms:Decrypt`. |
 | "Acceso denegado a S3 (403)" | El rol de la Function no tiene `s3:ListBucket`/`s3:GetObject`. |
 | "No se encontró el servicio de datos (404)" | Live Server no ejecuta `/api`: ajusta `DATA_API_URL` (ver §7). |
+| "No se encontraron los datos (404)" | La ubicación de `S3_DATA_URL` no tiene archivos de datos; el log de Vercel indica la ruta consultada. |
 | "Faltan columnas obligatorias" | El export cambió de nombres: usa `COLUMN_MAP`. |
 
 ---

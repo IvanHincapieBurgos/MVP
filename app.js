@@ -50,7 +50,6 @@ App.tokens = Object.freeze({
  * ========================================================================== */
 App.utils = (function () {
   'use strict';
-  const T = App.tokens;
 
   /**
    * Clasificación SEUROP de mejor a peor calidad (S·E·U·R·O·P).
@@ -65,24 +64,20 @@ App.utils = (function () {
     { key: 'Menos bueno', letter: 'O', color: '#b75c20ff', text: '#ffffff', soft: '#f6e5d9',     ink: '#7a3d14' },
     { key: 'Baja',        letter: 'P', color: '#be4f43ff', text: '#ffffff', soft: '#f7e1de',     ink: '#7f2e25' },
   ];
-  const SEUROP_INDEX = Object.fromEntries(SEUROP.map((s, i) => [s.key, i]));
 
   /**
    * Paso 3 — Escala SEUROP a partir del IQ-Col (mismo orden S·E·U·R·O·P que
    * SEUROP, por lo que el índice de IQ_COL es también el índice de SEUROP).
    */
-const IQ_COL = [
-  { key: 'S', orden: 1, label: 'Superior',      min: 100,   rango: '> 100',         color: T.primaryD },
-  { key: 'E', orden: 2, label: 'Excelente',     min: 87.29, rango: '87.29 – < 100', color: T.primary },
-  { key: 'U', orden: 3, label: 'Muy bueno',     min: 57.78, rango: '57.78 – < 87.29', color: '#c98a86' },
-  { key: 'R', orden: 4, label: 'Bueno',         min: 43.44, rango: '43.44 – < 57.78', color: '#e6c9c6' },
-  { key: 'O', orden: 5, label: 'Menos buenos',  min: 13.32, rango: '13.32 – < 43.44', color: '#f0dedc' },
-  { key: 'P', orden: 6, label: 'Bajo',          min: -Infinity, rango: '< 13.32',   color: T.greyLight },
-];
+  const IQ_COL = [
+    { key: 'S', label: 'Superior',     min: 100 },       // ≥ 100
+    { key: 'E', label: 'Excelente',    min: 87.29 },     // 87,29 – < 100
+    { key: 'U', label: 'Muy bueno',    min: 57.78 },     // 57,78 – < 87,29
+    { key: 'R', label: 'Bueno',        min: 43.44 },     // 43,44 – < 57,78
+    { key: 'O', label: 'Menos bueno',  min: 13.32 },     // 13,32 – < 43,44
+    { key: 'P', label: 'Baja',         min: -Infinity }, // < 13,32
+  ];
 
-// Clasifica un puntaje igual que la expresión if() anidada
-const clasificarIQ = (puntos) =>
-  IQ_COL.find(c => puntos >= c.min) ?? IQ_COL[IQ_COL.length - 1];
   function iqColIndex(v) {
     for (let i = 0; i < IQ_COL.length; i++) if (v >= IQ_COL[i].min) return i;
     return IQ_COL.length - 1;
@@ -233,10 +228,6 @@ const clasificarIQ = (puntos) =>
     const s = SEUROP[i];
     return `<span class="badge" style="background:${s.soft};color:${s.ink}"><span class="dot" style="background:${s.color}"></span>${s.key}</span>`;
   }
-  function iqBadge(i) {
-    const c = IQ_COL[i];
-    return `<span class="badge badge-neutral"><span class="dot" style="background:${c.color}"></span>${c.key}</span>`;
-  }
 
   /** Convierte <i data-lucide="..."> en SVG. */
   function icons() {
@@ -249,46 +240,10 @@ const clasificarIQ = (puntos) =>
     return b;
   }
 
-  /* ---------- Estadística (omite null / undefined / NaN) ------------------ */
-
-  /** Solo los valores numéricos válidos: los nulos no cuentan en n. */
-  const finiteValues = (arr) => arr.filter(Number.isFinite);
-
-  /** Media aritmética μ. NaN si no hay valores válidos. */
-  function mean(arr) {
-    const v = finiteValues(arr);
-    if (!v.length) return NaN;
-    let s = 0;
-    for (const x of v) s += x;
-    return s / v.length;
-  }
-
-  /**
-   * Desviación estándar σ. Por defecto muestral (n − 1), que es la usual para
-   * describir la homogeneidad de un lote; { sample: false } da la poblacional (n).
-   * NaN si no hay suficientes valores (n < 2 muestral, n < 1 poblacional).
-   */
-  function standardDeviation(arr, { sample = true } = {}) {
-    const v = finiteValues(arr);
-    const n = v.length;
-    if (n < (sample ? 2 : 1)) return NaN;
-    const m = mean(v);
-    let ss = 0;
-    for (const x of v) ss += (x - m) ** 2;
-    return Math.sqrt(ss / (sample ? n - 1 : n));
-  }
-
-  /** Coeficiente de variación CV = (σ / μ) × 100. */
-  function coefficientOfVariation(arr, opts) {
-    const m = mean(arr);
-    return m ? (standardDeviation(arr, opts) / m) * 100 : NaN;
-  }
-
   return {
-    SEUROP, SEUROP_INDEX, IQ_COL, iqColIndex, clasePesoCanal, calcIqCol, GRANULARIDADES, granLabel,
+    SEUROP, iqColIndex, calcIqCol, GRANULARIDADES, granLabel,
     fmt, fmtPct, fmtId, addDays, formatDate, periodKeys, periodLabel,
-    escapeHtml, seuropBadge, iqBadge, icons, argmax,
-    mean, standardDeviation, coefficientOfVariation,
+    escapeHtml, seuropBadge, icons, argmax,
   };
 })();
 
@@ -307,6 +262,12 @@ App.data = (function () {
     throw new Error('window.DASHBOARD_DATA no está disponible: data_loader.js debe cargar los datos antes que app.js.');
   }
 
+  /**
+   * Identidad de una granja operativa: la relación Planta - Granja. Un mismo
+   * nombre de granja que entrega a dos plantas cuenta como dos granjas.
+   */
+  const granjaKey = (planta, granja) => `${planta} - ${granja}`;
+
   const records = source.registros;
   let minDate = '9999-12-31';
   let maxDate = '0000-01-01';
@@ -317,6 +278,7 @@ App.data = (function () {
     r._mes = k.mes;
     r._trimestre = k.trimestre;
     r._anio = k.anio;
+    r._gk = granjaKey(r.planta, r.granja);
     // IQ-Col calculado con los cuartiles (pasos 1-2) y clase SEUROP derivada de él (paso 3)
     r.iq_col = U.calcIqCol(r.peso_kg, r.porcentaje_magro, r.pais, +k.anio);
     r._iq = U.iqColIndex(r.iq_col);
@@ -327,9 +289,16 @@ App.data = (function () {
   }
 
   const plantas = source.catalogos.plantas.slice();
-  const granjas = source.catalogos.granjas.slice(); // [{ nombre, planta }]
+  // [{ key: 'Planta - Granja', nombre, planta }] ordenado por planta y luego por granja
+  const byText = new Intl.Collator('es', { sensitivity: 'base', numeric: true }).compare;
+  const granjas = source.catalogos.granjas
+    .map((g) => ({ key: granjaKey(g.planta, g.nombre), nombre: g.nombre, planta: g.planta }))
+    .sort((a, b) => byText(a.planta, b.planta) || byText(a.nombre, b.nombre));
 
-  /** plantas/granjas undefined ⇒ sin restricción; arreglo vacío ⇒ sin registros. */
+  /**
+   * plantas: nombres de planta · granjas: claves 'Planta - Granja'.
+   * undefined ⇒ sin restricción; arreglo vacío ⇒ sin registros.
+   */
   function filter(f) {
     const pSet = f.plantas ? new Set(f.plantas) : null;
     const gSet = f.granjas ? new Set(f.granjas) : null;
@@ -338,7 +307,7 @@ App.data = (function () {
     for (const r of records) {
       if (r.fecha < f.desde || r.fecha > f.hasta) continue;
       if (pSet && !pSet.has(r.planta)) continue;
-      if (gSet && !gSet.has(r.granja)) continue;
+      if (gSet && !gSet.has(r._gk)) continue;
       out.push(r);
     }
     return out;
@@ -362,7 +331,7 @@ App.data = (function () {
   }
 
   /**
-   * CV del peso = σ / μ × 100, con σ muestral (n − 1) como en U.standardDeviation.
+   * CV del peso = σ / μ × 100, con σ muestral (n − 1).
    * NaN con menos de 2 canales (σ no definida); 0 si todos los pesos son iguales.
    */
   function cvPeso(a) {
@@ -399,11 +368,12 @@ App.data = (function () {
 
     for (const r of rows) {
       accumulate(total, r);
-      let g = byGranja.get(r.granja);
+      let g = byGranja.get(r._gk);
       if (!g) {
-        g = createAcc(r.granja);
+        g = createAcc(r._gk);
+        g.nombre = r.granja;
         g.planta = r.planta;
-        byGranja.set(r.granja, g);
+        byGranja.set(r._gk, g);
       }
       accumulate(g, r);
       let p = byPeriodo.get(r[field]);
@@ -416,7 +386,7 @@ App.data = (function () {
 
     return {
       total: finalize(total),
-      granjas: [...byGranja.values()].map((a) => Object.assign(finalize(a), { planta: a.planta })),
+      granjas: [...byGranja.values()].map((a) => Object.assign(finalize(a), { nombre: a.nombre, planta: a.planta })),
       periodos: [...byPeriodo.values()]
         .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
         .map((a, idx) => Object.assign(finalize(a), { idx })),
@@ -429,7 +399,7 @@ App.data = (function () {
     return c;
   }
 
-  return { records, plantas, granjas, minDate, maxDate, meta: source.meta, filter, aggregate, seuropCounts };
+  return { plantas, granjas, minDate, maxDate, meta: source.meta, filter, aggregate, seuropCounts };
 })();
 
 /* ==========================================================================
@@ -538,6 +508,9 @@ App.components = {};
 /* --------------------------------------------------------------------------
  * 5.1 MultiSelect — desplegable compacto con checkboxes, búsqueda, agrupación,
  *     "Seleccionar todo"/"Limpiar", cierre con clic externo o Escape.
+ *     Con `group` en las opciones, cada grupo tiene una cabecera con casilla
+ *     que marca/desmarca todas sus opciones visibles (estado indeterminado si
+ *     solo hay algunas). La búsqueda compara la etiqueta y el grupo.
  *     El panel se monta en <body> con posición fija: así no lo recorta el
  *     contenedor con scroll horizontal de la barra superior.
  *     new MultiSelect(el, { label, options:[{value,label,group?}], selected, onChange })
@@ -609,8 +582,14 @@ App.components.MultiSelect = class MultiSelect {
     this.list.addEventListener('change', (e) => {
       const cb = e.target.closest('input[type="checkbox"]');
       if (!cb) return;
-      if (cb.checked) this.selected.add(cb.value);
+      if (cb.dataset.group !== undefined) {
+        // Cabecera de grupo: aplica a todas las opciones visibles del grupo
+        const gi = cb.dataset.group;
+        for (const o of this._groups[gi].options) cb.checked ? this.selected.add(o.value) : this.selected.delete(o.value);
+        this.list.querySelectorAll(`input[data-gi="${gi}"]`).forEach((opt) => (opt.checked = cb.checked));
+      } else if (cb.checked) this.selected.add(cb.value);
       else this.selected.delete(cb.value);
+      this._syncGroups();
       this._emit();
     });
     // Acciones masivas sobre las opciones visibles según la búsqueda
@@ -654,29 +633,62 @@ App.components.MultiSelect = class MultiSelect {
   }
 
   _visibleOptions() {
-    return this.query ? this.options.filter((o) => o.label.toLowerCase().includes(this.query)) : this.options;
+    const q = this.query;
+    if (!q) return this.options;
+    return this.options.filter((o) => o.label.toLowerCase().includes(q) || (o.group || '').toLowerCase().includes(q));
   }
 
   _renderList() {
     const esc = App.utils.escapeHtml;
     const visibles = this._visibleOptions();
     if (!visibles.length) {
+      this._groups = [];
       this.list.innerHTML = '<p class="px-4 py-3 text-sm text-grey-mid">Sin coincidencias</p>';
       return;
     }
-    let html = '';
-    let grupo = null;
+    // Agrupa conservando el orden de aparición (los grupos quedan contiguos)
+    const byGroup = new Map();
     for (const o of visibles) {
-      if (o.group && o.group !== grupo) {
-        grupo = o.group;
-        html += `<div class="ms-group">${esc(o.group)}</div>`;
-      }
-      const sel = this.selected.has(o.value);
-      html += `<label class="ms-option" role="option" aria-selected="${sel}">
-          <input type="checkbox" value="${esc(o.value)}" ${sel ? 'checked' : ''} /><span class="truncate">${esc(o.label)}</span>
-        </label>`;
+      const g = o.group || '';
+      if (!byGroup.has(g)) byGroup.set(g, []);
+      byGroup.get(g).push(o);
     }
-    this.list.innerHTML = html;
+    this._groups = [...byGroup].map(([name, options]) => ({ name, options }));
+
+    const option = (o, gi) => {
+      const sel = this.selected.has(o.value);
+      return `<label class="ms-option${o.group ? ' pl-8' : ''}" role="option" aria-selected="${sel}">
+          <input type="checkbox" value="${esc(o.value)}" data-gi="${gi}" ${sel ? 'checked' : ''} /><span class="truncate">${esc(o.label)}</span>
+        </label>`;
+    };
+    this.list.innerHTML = this._groups
+      .map(({ name, options }, gi) =>
+        name
+          ? `<div role="group" aria-label="${esc(name)}">
+              <label class="mx-2 mt-2 flex cursor-pointer items-center gap-2 rounded bg-surface px-3 py-1.5 text-xs font-bold text-primary">
+                <input type="checkbox" class="h-[15px] w-[15px] shrink-0 cursor-pointer accent-primary" data-group="${gi}" aria-label="Seleccionar todas las granjas de ${esc(name)}" />
+                <span class="min-w-0 flex-1 truncate">${esc(name)}</span>
+                <span class="num shrink-0 font-semibold text-grey-mid" data-group-count="${gi}"></span>
+              </label>
+              ${options.map((o) => option(o, gi)).join('')}
+            </div>`
+          : options.map((o) => option(o, gi)).join('')
+      )
+      .join('');
+    this._syncGroups();
+  }
+
+  /** Estado de cada cabecera de grupo: marcada, indeterminada o vacía, y su conteo. */
+  _syncGroups() {
+    (this._groups || []).forEach(({ options }, gi) => {
+      const head = this.list.querySelector(`input[data-group="${gi}"]`);
+      if (!head) return;
+      const n = options.reduce((c, o) => c + (this.selected.has(o.value) ? 1 : 0), 0);
+      head.checked = n === options.length;
+      head.indeterminate = n > 0 && n < options.length;
+      this.list.querySelector(`[data-group-count="${gi}"]`).textContent = `${n}/${options.length}`;
+    });
+    this.list.querySelectorAll('.ms-option').forEach((l) => l.setAttribute('aria-selected', String(l.querySelector('input').checked)));
   }
 
   _renderSummary() {
@@ -784,10 +796,14 @@ App.components.DateRange = class DateRange {
  * 5.3 DataTable — orden por columna (clic/teclado), paginación opcional,
  *     encabezado fijo y hover sincronizable. Solo renderiza la página
  *     visible, por lo que es fluida con 16.000 filas.
- *     columns: [{ key, label, align?, type?: 'text', render?(row), sortValue?(row), defaultDir? }]
- *     Opciones de presentación:
- *       striped: true          filas alternas
+ *     columns: [{ key, label, align?, type?: 'text', render?(row, pos), sortValue?(row),
+ *                 defaultDir?, sortable?: false }]
+ *       render recibe la posición absoluta de la fila según el orden activo:
+ *       pos = ((página − 1) × pageSize) + índice + 1  (columnas tipo "#").
+ *     Opciones de paginación:
+ *       pageSize: 10           filas por página (0 = sin paginar)
  *       pagerStyle: 'simple'   "Anterior · Página X de Y · Siguiente" (por defecto: numerado)
+ *       pagerClass: '...'      clases extra del contenedor de paginación
  *       unit: 'granjas'        sustantivo del contador de la paginación
  * ------------------------------------------------------------------------ */
 App.components.DataTable = class DataTable {
@@ -805,10 +821,7 @@ App.components.DataTable = class DataTable {
     this.sortKey = cfg.sortKey || null;
     this.sortDir = cfg.sortDir || 'desc';
     this.pageSize = cfg.pageSize || 0;
-    this.emptyText = cfg.emptyText || 'No hay registros para los filtros seleccionados.';
     this.onRowHover = cfg.onRowHover || null;
-    this.compact = !!cfg.compact;
-    this.striped = !!cfg.striped;
     this.pagerStyle = cfg.pagerStyle || 'full';
     this.unit = cfg.unit || 'registros';
     this.page = 1;
@@ -816,12 +829,11 @@ App.components.DataTable = class DataTable {
     this.sorted = [];
     this.visible = [];
 
-    const tableClass = ['data-table', this.compact && 'data-table--compact', this.striped && 'data-table--striped'].filter(Boolean).join(' ');
     root.innerHTML = `
       <div class="table-scroll" ${cfg.maxHeight ? `style="max-height:${cfg.maxHeight}px"` : ''}>
-        <table class="${tableClass}"><thead></thead><tbody></tbody></table>
+        <table class="data-table"><thead></thead><tbody></tbody></table>
       </div>
-      ${this.pageSize ? '<nav class="pager" aria-label="Paginación"></nav>' : ''}`;
+      ${this.pageSize ? `<nav class="pager ${cfg.pagerClass || ''}" aria-label="Paginación"></nav>` : ''}`;
 
     this.scroll = root.querySelector('.table-scroll');
     this.thead = root.querySelector('thead');
@@ -873,7 +885,7 @@ App.components.DataTable = class DataTable {
 
   sortBy(key) {
     const col = this.columns.find((c) => c.key === key);
-    if (!col) return;
+    if (!col || col.sortable === false) return;
     if (this.sortKey === key) this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
     else {
       this.sortKey = key;
@@ -925,15 +937,16 @@ App.components.DataTable = class DataTable {
     this.visible = this.pageSize ? this.sorted.slice(start, start + this.pageSize) : this.sorted;
 
     if (!this.visible.length) {
-      this.tbody.innerHTML = `<tr><td colspan="${this.columns.length}" class="empty-cell">${this.emptyText}</td></tr>`;
+      this.tbody.innerHTML = `<tr><td colspan="${this.columns.length}" class="empty-cell">No hay registros para los filtros seleccionados.</td></tr>`;
     } else {
       const esc = App.utils.escapeHtml;
       let html = '';
       for (let i = 0; i < this.visible.length; i++) {
         const row = this.visible[i];
+        const pos = start + i + 1; // ((página − 1) × pageSize) + índice + 1
         html += `<tr data-i="${i}">`;
         for (const c of this.columns) {
-          html += `<td class="${DataTable.alignClass(c)}">${c.render ? c.render(row) : esc(row[c.key])}</td>`;
+          html += `<td class="${DataTable.alignClass(c)}">${c.render ? c.render(row, pos) : esc(row[c.key])}</td>`;
         }
         html += '</tr>';
       }
@@ -947,6 +960,7 @@ App.components.DataTable = class DataTable {
       '<tr>' +
       this.columns
         .map((c) => {
+          if (c.sortable === false) return `<th class="${DataTable.alignClass(c)}" scope="col">${c.label}</th>`;
           const active = c.key === this.sortKey;
           const aria = active ? (this.sortDir === 'asc' ? 'ascending' : 'descending') : 'none';
           const cls = [DataTable.alignClass(c), active ? 'is-sorted' : ''].join(' ');
@@ -1030,7 +1044,7 @@ App.filters = (function () {
     desde: D.minDate,
     hasta: D.maxDate,
     plantas: D.plantas.slice(),
-    granjas: D.granjas.map((g) => g.nombre),
+    granjas: D.granjas.map((g) => g.key),
   });
 
   const state = defaults();
@@ -1071,7 +1085,7 @@ App.filters = (function () {
     return () => listeners.delete(fn);
   }
 
-  return { state, defaults, rows, set, reset: () => set(defaults()), subscribe };
+  return { state, rows, set, reset: () => set(defaults()), subscribe };
 })();
 
 /* ==========================================================================
@@ -1094,6 +1108,8 @@ App.views.inicio = (function () {
   const C = App.charts;
   const F = App.filters;
   const { DataTable } = App.components;
+
+  const RANKING_PAGE_SIZE = 10;
 
   // Estado propio de la vista (solo visual); los filtros viven en App.filters
   const state = { lines: { peso: true, magro: true, grasa: true } };
@@ -1163,7 +1179,7 @@ App.views.inicio = (function () {
       </div>
 
       <section class="card mb-6">
-        ${cardHeader('Ranking por granja', 'Ordenado por cantidad de canales · CV peso = σ / μ × 100 · haga clic en un encabezado para reordenar')}
+        ${cardHeader('Ranking por granja', `Granja operativa (planta - granja) · ${RANKING_PAGE_SIZE} por página · CV peso = σ / μ × 100 · haga clic en un encabezado para reordenar`)}
         <div class="px-2 pb-2 md:px-3" data-ref="tableRanking"></div>
       </section>
 
@@ -1216,7 +1232,15 @@ App.views.inicio = (function () {
       ui.lineToggles.querySelectorAll('input[data-line]').forEach((cb) => (cb.checked = state.lines[cb.dataset.line]));
     });
 
-    tables.ranking = new DataTable(ui.tableRanking, { columns: rankingColumns(), sortKey: 'count', sortDir: 'desc' });
+    tables.ranking = new DataTable(ui.tableRanking, {
+      columns: rankingColumns(),
+      sortKey: 'count',
+      sortDir: 'desc',
+      pageSize: RANKING_PAGE_SIZE,
+      pagerStyle: 'simple',
+      pagerClass: 'mt-3 mb-1 rounded-[20px] border border-line bg-surface px-4',
+      unit: 'granjas',
+    });
     tables.periodos = new DataTable(ui.tablePeriodos, {
       columns: periodColumns(),
       sortKey: 'key',
@@ -1254,7 +1278,7 @@ App.views.inicio = (function () {
     const t = agg.total;
     const { desde, hasta } = F.state;
     ui['kpi-granjas'].textContent = U.fmt(agg.granjas.length);
-    ui['kpi-granjas-sub'].textContent = `de ${D.granjas.length} granjas registradas`;
+    ui['kpi-granjas-sub'].textContent = `de ${U.fmt(D.granjas.length)} granjas operativas (planta - granja)`;
     ui['kpi-canales'].textContent = U.fmt(t.count);
     ui['kpi-canales-sub'].textContent = `${U.formatDate(desde)} – ${U.formatDate(hasta)}`;
 
@@ -1344,11 +1368,13 @@ App.views.inicio = (function () {
 
   function rankingColumns() {
     return [
+      // Posición según el orden activo; continúa entre páginas (11–20 en la página 2…)
+      { key: 'pos', label: '#', align: 'right', sortable: false, render: (r, pos) => `<span class="num font-semibold text-grey-mid">${U.fmt(pos)}</span>` },
       {
-        key: 'key',
+        key: 'nombre',
         label: 'Granja',
         type: 'text',
-        render: (r) => `<div class="font-semibold text-ink">${U.escapeHtml(r.key)}</div><div class="text-xs text-grey-mid">${U.escapeHtml(r.planta)}</div>`,
+        render: (r) => `<div class="font-semibold text-ink">${U.escapeHtml(r.nombre)}</div><div class="text-xs text-grey-mid">${U.escapeHtml(r.planta)}</div>`,
       },
       {
         key: 'count',
@@ -1852,7 +1878,7 @@ App.views.scores = (function () {
   const plantaOptions = () => D.plantas.map((p) => ({ value: p, label: p }));
   function granjaOptions(plantas) {
     const set = new Set(plantas);
-    return D.granjas.filter((g) => set.has(g.planta)).map((g) => ({ value: g.nombre, label: g.nombre, group: g.planta }));
+    return D.granjas.filter((g) => set.has(g.planta)).map((g) => ({ value: g.key, label: g.nombre, group: g.planta }));
   }
 
   function mountFilters() {

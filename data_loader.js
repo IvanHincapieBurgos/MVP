@@ -26,7 +26,6 @@ const HYPARQUET_COMPRESSORS = 'https://cdn.jsdelivr.net/npm/hyparquet-compressor
 
 const CFG = Object.assign(
   {
-    S3_DATA_URL: '',
     DATA_API_URL: '/api/canales',
     REQUEST_TIMEOUT_MS: 30000,
     TIMEZONE: 'UTC',
@@ -72,7 +71,6 @@ const ui = {
   status: $('[data-shell="status"]'),
   loading: $('[data-status="loading"]'),
   message: $('[data-status="message"]'),
-  source: $('[data-status="source"]'),
   error: $('[data-status="error"]'),
   errorTitle: $('[data-status="error-title"]'),
   errorDetail: $('[data-status="error-detail"]'),
@@ -83,14 +81,19 @@ const ui = {
 };
 const icons = () => window.lucide && typeof window.lucide.createIcons === 'function' && window.lucide.createIcons();
 
+const FADE_MS = 300; // igual a duration-300 de la capa de carga
+
 function showLoading(message) {
+  clearTimeout(hideTimer);
   ui.status.hidden = false;
   ui.error.hidden = true;
   ui.loading.hidden = false;
+  ui.loading.classList.remove('opacity-0');
   ui.message.textContent = message;
 }
 
 function showError({ title, detail, hints }) {
+  clearTimeout(hideTimer);
   ui.status.hidden = false;
   ui.loading.hidden = true;
   ui.error.hidden = false;
@@ -107,7 +110,15 @@ function showError({ title, detail, hints }) {
   icons();
 }
 
-const hideStatus = () => (ui.status.hidden = true);
+/** Desvanece la capa de carga y la retira cuando termina la transición. */
+let hideTimer = 0;
+function hideStatus() {
+  ui.loading.classList.add('opacity-0');
+  hideTimer = setTimeout(() => {
+    ui.status.hidden = true;
+    ui.loading.classList.remove('opacity-0');
+  }, FADE_MS);
+}
 
 function showNotice(text) {
   ui.noticeText.textContent = text;
@@ -248,7 +259,7 @@ async function readAllParquet(files) {
   const rows = [];
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
-    showLoading(files.length > 1 ? `Procesando archivo ${i + 1} de ${files.length}…` : 'Procesando datos…');
+    showLoading(files.length > 1 ? `Procesando datos (${i + 1} de ${files.length})...` : 'Procesando datos...');
     const part = await readParquet(f.buffer, f.key.split('/').pop());
     for (const r of part) rows.push(r);
   }
@@ -264,12 +275,7 @@ function parseApiInfo(info) {
   if (!valid.length || !info.etag) {
     throw new LoadError('El servicio de datos respondió sin archivos para descargar', { kind: 'data', stage: 'api' });
   }
-  return {
-    etag: String(info.etag),
-    location: info.location || info.key || CFG.S3_DATA_URL,
-    lastModified: info.last_modified || null,
-    files: valid,
-  };
+  return { etag: String(info.etag), lastModified: info.last_modified || null, files: valid };
 }
 
 /**
@@ -277,7 +283,7 @@ function parseApiInfo(info) {
  * @returns {Promise<{ rows: object[], meta: object }>}
  */
 async function loadDataFromS3() {
-  showLoading('Consultando la versión más reciente de los datos…');
+  showLoading('Cargando información del sistema...');
   const cachePromise = readCache();
 
   let info = null;
@@ -295,15 +301,15 @@ async function loadDataFromS3() {
   } else if (info) {
     try {
       let done = 0;
-      showLoading(info.files.length > 1 ? `Descargando ${info.files.length} archivos desde S3…` : 'Descargando datos desde S3…');
+      showLoading('Obteniendo datos...');
       const files = await Promise.all(
         info.files.map(async (f) => {
           const buffer = await (await fetchOk(f.url, 's3')).arrayBuffer();
-          if (info.files.length > 1) showLoading(`Descargando archivos desde S3… (${++done} de ${info.files.length})`);
+          if (info.files.length > 1) showLoading(`Obteniendo datos (${++done} de ${info.files.length})...`);
           return { key: f.key, buffer };
         })
       );
-      entry = { etag: info.etag, location: info.location, lastModified: info.lastModified, savedAt: new Date().toISOString(), files };
+      entry = { etag: info.etag, lastModified: info.lastModified, savedAt: new Date().toISOString(), files };
       await writeCache(entry);
     } catch (e) {
       failure = e;
@@ -318,20 +324,10 @@ async function loadDataFromS3() {
   }
 
   const rows = await readAllParquet(entry.files);
-  const name = String(entry.location || '').replace(/\/+$/, '').split('/').pop() || 'Parquet';
   return {
     rows,
-    meta: {
-      fuente: stale ? `S3 · ${name} (copia guardada)` : `S3 · ${name}`,
-      origen: 's3',
-      archivo: entry.location,
-      archivos: entry.files.map((f) => f.key),
-      etag: entry.etag,
-      generado: entry.lastModified,
-      guardado: entry.savedAt,
-      desactualizado: stale,
-      error_conexion: stale && failure ? failure.message : null,
-    },
+    // `fuente` se muestra en el sidebar: nunca incluye rutas ni nombres de bucket
+    meta: { fuente: stale ? 'Copia guardada' : 'Datos en línea', origen: 's3', generado: entry.lastModified, desactualizado: stale },
   };
 }
 
@@ -343,12 +339,12 @@ async function loadFromLocalParquet(path) {
   if (url.origin !== location.origin) {
     throw new LoadError('?archivo= solo admite rutas del mismo sitio', { kind: 'data', stage: 'local' });
   }
-  showLoading(`Leyendo ${path}…`);
+  showLoading('Obteniendo datos...');
   const buffer = await (await fetchOk(url.href, 'local')).arrayBuffer();
   const rows = await readAllParquet([{ key: path, buffer }]);
   return {
     rows,
-    meta: { fuente: `Parquet local · ${path.split('/').pop()}`, origen: 'parquet', archivo: path, generado: new Date().toISOString() },
+    meta: { fuente: 'Archivo local de prueba', origen: 'parquet', generado: new Date().toISOString() },
   };
 }
 
@@ -526,20 +522,14 @@ function buildDataset(rows, metaExtra) {
     meta: {
       tabla: 'canales',
       ...metaExtra,
-      desde: registros[0].fecha,
-      hasta: registros[registros.length - 1].fecha,
       total: registros.length,
       descartados,
-      motivos_descarte: motivos,
     },
     catalogos: {
       plantas: uniques(registros, 'planta'),
       granjas: [...granjas.values()].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')),
-      comercializadores: uniques(registros, 'comercializador'),
-      sistemas_medicion: uniques(registros, 'sistema_medicion'),
     },
     registros,
-    helpers: window.DataUtils,
   };
 }
 
@@ -583,7 +573,11 @@ function describeError(e) {
       };
     }
     if (e.status === 404) {
-      return { title: 'No se encontró el Parquet en S3 (404)', detail: e.apiMessage, hints: [`Verifica que exista ${CFG.S3_DATA_URL} y que S3_DATA_URL en Vercel apunte a la misma ruta.`] };
+      return {
+        title: 'No se encontraron los datos (404)',
+        detail: 'La ubicación configurada no tiene archivos de datos.',
+        hints: ['Verifica que el export de Aurora se haya generado y que S3_DATA_URL en Vercel coincida con config.js.'],
+      };
     }
     if (e.status === 403 || /permiso/i.test(e.apiMessage || '')) {
       return {
@@ -600,7 +594,7 @@ function describeError(e) {
       return {
         title: 'El navegador no pudo descargar el archivo de S3',
         detail: 'La petición a S3 fue bloqueada. La causa más común es CORS.',
-        hints: [corsHint, 'Si usas VPN o proxy corporativo, verifica que permita *.s3.amazonaws.com.'],
+        hints: [corsHint, 'Si usas VPN o proxy corporativo, verifica que permita el acceso a AWS S3.'],
       };
     }
     if (e.kind === 'timeout') {
@@ -636,18 +630,16 @@ let appLoaded = false;
 
 async function boot() {
   ui.retry.disabled = true;
-  ui.source.textContent = CFG.S3_DATA_URL || CFG.DATA_API_URL;
   try {
     const localFile = new URLSearchParams(location.search).get('archivo');
     const { rows, meta } = localFile ? await loadFromLocalParquet(localFile) : await loadDataFromS3();
 
-    showLoading('Validando registros…');
+    showLoading('Procesando datos...');
     const dataset = buildDataset(rows, meta);
     window.DASHBOARD_DATA = dataset;
-    console.info(`[data_loader] ${dataset.meta.total} registros válidos (${dataset.meta.descartados} descartados) · ${dataset.meta.fuente}`);
 
     if (!appLoaded) {
-      showLoading('Construyendo el tablero…');
+      showLoading('Preparando el tablero...');
       await loadScript('app.js');
       appLoaded = true;
     }

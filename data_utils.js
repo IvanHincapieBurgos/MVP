@@ -4,27 +4,16 @@
  * Helpers de datos compartidos por el pipeline de carga (data_loader.js) y
  * app.js. Timestamps en hora local con formato 'YYYY-MM-DD HH:mm:ss'.
  *
- * Expone:  window.DataUtils
- *          window.calcularTiempoEsperaSacrificio(registro)
+ * Expone:  window.DataUtils = { calcularTiempoEsperaSacrificio, aplicarTiempoEsperaSacrificio }
  * ========================================================================== */
 (function () {
   'use strict';
 
   const MIN_MS = 60 * 1000;
-  const pad = (n) => String(n).padStart(2, '0');
   const redondear = (v, decimales) => {
     const f = 10 ** decimales;
     return Math.round(v * f) / f;
   };
-
-  /** Formatea epoch-ms como 'YYYY-MM-DD HH:mm:ss' (hora local). */
-  function formatearTimestamp(ms) {
-    const d = new Date(ms);
-    return (
-      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-      `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-    );
-  }
 
   /** Parsea 'YYYY-MM-DD HH:mm:ss' (hora local) a epoch-ms; null si no es válido. */
   function parsearTimestamp(valor) {
@@ -59,10 +48,7 @@
   }
 
   window.DataUtils = Object.freeze({
-    parsearTimestamp,
-    formatearTimestamp,
     calcularTiempoEsperaSacrificio,
     aplicarTiempoEsperaSacrificio,
   });
-  window.calcularTiempoEsperaSacrificio = calcularTiempoEsperaSacrificio;
 })();

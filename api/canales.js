@@ -2,9 +2,12 @@
  * api/canales.js — Vercel Function (Node.js)
  * --------------------------------------------------------------------------
  * GET /api/canales → {
- *   location, etag, last_modified, size,
+ *   etag, last_modified, size,
  *   files: [{ key, etag, size, last_modified, url }]
  * }
+ *
+ * La respuesta y los mensajes de error no incluyen el bucket ni la ruta
+ * configurada (solo las URLs firmadas, que S3 necesita para servir el archivo).
  *
  * Resuelve la ubicación del Parquet en S3 y devuelve URLs firmadas de corta
  * duración para descargarlo. El bucket sigue privado: el navegador nunca
@@ -142,7 +145,8 @@ export default async function handler(req, res) {
   try {
     const archivos = await resolverArchivos(loc);
     if (!archivos.length) {
-      return res.status(404).json({ error: `No hay archivos de datos en s3://${loc.bucket}/${loc.path}` });
+      console.error(`[api/canales] Sin archivos de datos en s3://${loc.bucket}/${loc.path}`);
+      return res.status(404).json({ error: 'No hay archivos de datos en la ubicación configurada' });
     }
     if (archivos.length > MAX_ARCHIVOS) archivos.length = MAX_ARCHIVOS;
 
@@ -165,7 +169,6 @@ export default async function handler(req, res) {
     const fechas = files.map((f) => f.last_modified).filter(Boolean).sort();
 
     return res.status(200).json({
-      location: `s3://${loc.bucket}/${loc.path}`,
       etag,
       last_modified: fechas.length ? fechas[fechas.length - 1] : null,
       size: files.reduce((s, f) => s + (f.size || 0), 0),
