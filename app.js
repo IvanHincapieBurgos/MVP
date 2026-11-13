@@ -262,12 +262,6 @@ App.data = (function () {
     throw new Error('window.DASHBOARD_DATA no está disponible: data_loader.js debe cargar los datos antes que app.js.');
   }
 
-  /**
-   * Identidad de una granja operativa: la relación Planta - Granja. Un mismo
-   * nombre de granja que entrega a dos plantas cuenta como dos granjas.
-   */
-  const granjaKey = (planta, granja) => `${planta} - ${granja}`;
-
   const records = source.registros;
   let minDate = '9999-12-31';
   let maxDate = '0000-01-01';
@@ -278,7 +272,6 @@ App.data = (function () {
     r._mes = k.mes;
     r._trimestre = k.trimestre;
     r._anio = k.anio;
-    r._gk = granjaKey(r.planta, r.granja);
     // IQ-Col calculado con los cuartiles (pasos 1-2) y clase SEUROP derivada de él (paso 3)
     r.iq_col = U.calcIqCol(r.peso_kg, r.porcentaje_magro, r.pais, +k.anio);
     r._iq = U.iqColIndex(r.iq_col);
@@ -289,14 +282,28 @@ App.data = (function () {
   }
 
   const plantas = source.catalogos.plantas.slice();
-  // [{ key: 'Planta - Granja', nombre, planta }] ordenado por planta y luego por granja
+
+  /*
+   * Granjas: identidad por NOMBRE único. Una granja que entrega a varias
+   * plantas es una sola granja. catalogos.granjas trae los pares
+   * { nombre, planta } y solo se usa para saber en qué plantas tiene registros.
+   */
   const byText = new Intl.Collator('es', { sensitivity: 'base', numeric: true }).compare;
-  const granjas = source.catalogos.granjas
-    .map((g) => ({ key: granjaKey(g.planta, g.nombre), nombre: g.nombre, planta: g.planta }))
-    .sort((a, b) => byText(a.planta, b.planta) || byText(a.nombre, b.nombre));
+  const plantasPorGranja = new Map(); // nombre de granja → Set(plantas)
+  for (const g of source.catalogos.granjas) {
+    if (!plantasPorGranja.has(g.nombre)) plantasPorGranja.set(g.nombre, new Set());
+    plantasPorGranja.get(g.nombre).add(g.planta);
+  }
+  const granjas = [...plantasPorGranja.keys()].sort(byText);
+
+  /** Granjas únicas (orden alfabético) con registros en al menos una de las plantas dadas. */
+  function granjasDePlantas(lista) {
+    const set = new Set(lista);
+    return granjas.filter((g) => [...plantasPorGranja.get(g)].some((p) => set.has(p)));
+  }
 
   /**
-   * plantas: nombres de planta · granjas: claves 'Planta - Granja'.
+   * plantas: nombres de planta · granjas: nombres únicos de granja.
    * undefined ⇒ sin restricción; arreglo vacío ⇒ sin registros.
    */
   function filter(f) {
@@ -307,7 +314,7 @@ App.data = (function () {
     for (const r of records) {
       if (r.fecha < f.desde || r.fecha > f.hasta) continue;
       if (pSet && !pSet.has(r.planta)) continue;
-      if (gSet && !gSet.has(r._gk)) continue;
+      if (gSet && !gSet.has(r.granja)) continue;
       out.push(r);
     }
     return out;
@@ -359,7 +366,10 @@ App.data = (function () {
     };
   }
 
-  /** Agregación completa de la vista Inicio en una sola pasada. */
+  /**
+   * Agregación completa de la vista Inicio en una sola pasada.
+   * granjas: una entrada por nombre único de granja (consolida todas sus plantas).
+   */
   function aggregate(rows, gran) {
     const field = '_' + gran;
     const total = createAcc('total');
@@ -368,12 +378,10 @@ App.data = (function () {
 
     for (const r of rows) {
       accumulate(total, r);
-      let g = byGranja.get(r._gk);
+      let g = byGranja.get(r.granja);
       if (!g) {
-        g = createAcc(r._gk);
-        g.nombre = r.granja;
-        g.planta = r.planta;
-        byGranja.set(r._gk, g);
+        g = createAcc(r.granja);
+        byGranja.set(r.granja, g);
       }
       accumulate(g, r);
       let p = byPeriodo.get(r[field]);
@@ -386,7 +394,7 @@ App.data = (function () {
 
     return {
       total: finalize(total),
-      granjas: [...byGranja.values()].map((a) => Object.assign(finalize(a), { nombre: a.nombre, planta: a.planta })),
+      granjas: [...byGranja.values()].map((a) => Object.assign(finalize(a), { nombre: a.key })),
       periodos: [...byPeriodo.values()]
         .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
         .map((a, idx) => Object.assign(finalize(a), { idx })),
@@ -399,7 +407,7 @@ App.data = (function () {
     return c;
   }
 
-  return { plantas, granjas, minDate, maxDate, meta: source.meta, filter, aggregate, seuropCounts };
+  return { plantas, granjas, granjasDePlantas, minDate, maxDate, meta: source.meta, filter, aggregate, seuropCounts };
 })();
 
 /* ==========================================================================
@@ -451,15 +459,21 @@ App.charts = (function () {
     );
   }
 
-  /** dataZoom cuando hay más periodos de los que caben con claridad. */
-  function zoomFor(n, visible = 31) {
+  /**
+   * dataZoom cuando hay más categorías de las que caben con claridad.
+   * Por defecto muestra el final (periodos más recientes); fromStart muestra
+   * el inicio (p. ej. granjas ordenadas de mayor a menor volumen).
+   */
+  function zoomFor(n, visible = 31, fromStart = false) {
     if (n <= visible) return null;
-    const start = Math.max(0, (1 - visible / n) * 100);
+    const span = (visible / n) * 100;
+    const start = fromStart ? 0 : Math.max(0, 100 - span);
+    const end = fromStart ? Math.min(100, span) : 100;
     return [
       {
         type: 'slider',
         start,
-        end: 100,
+        end,
         height: 18,
         bottom: 8,
         brushSelect: false,
@@ -473,7 +487,7 @@ App.charts = (function () {
         emphasis: { handleStyle: { color: T.primaryD }, moveHandleStyle: { color: T.primary } },
         textStyle: { color: T.greyMid, fontSize: 11 },
       },
-      { type: 'inside', start, end: 100 },
+      { type: 'inside', start, end },
     ];
   }
 
@@ -506,14 +520,11 @@ App.charts = (function () {
 App.components = {};
 
 /* --------------------------------------------------------------------------
- * 5.1 MultiSelect — desplegable compacto con checkboxes, búsqueda, agrupación,
- *     "Seleccionar todo"/"Limpiar", cierre con clic externo o Escape.
- *     Con `group` en las opciones, cada grupo tiene una cabecera con casilla
- *     que marca/desmarca todas sus opciones visibles (estado indeterminado si
- *     solo hay algunas). La búsqueda compara la etiqueta y el grupo.
+ * 5.1 MultiSelect — desplegable compacto con checkboxes en lista plana,
+ *     búsqueda, "Seleccionar todo"/"Limpiar", cierre con clic externo o Escape.
  *     El panel se monta en <body> con posición fija: así no lo recorta el
  *     contenedor con scroll horizontal de la barra superior.
- *     new MultiSelect(el, { label, options:[{value,label,group?}], selected, onChange })
+ *     new MultiSelect(el, { label, options:[{value,label}], selected, onChange })
  * ------------------------------------------------------------------------ */
 App.components.MultiSelect = class MultiSelect {
   constructor(root, opts) {
@@ -582,14 +593,9 @@ App.components.MultiSelect = class MultiSelect {
     this.list.addEventListener('change', (e) => {
       const cb = e.target.closest('input[type="checkbox"]');
       if (!cb) return;
-      if (cb.dataset.group !== undefined) {
-        // Cabecera de grupo: aplica a todas las opciones visibles del grupo
-        const gi = cb.dataset.group;
-        for (const o of this._groups[gi].options) cb.checked ? this.selected.add(o.value) : this.selected.delete(o.value);
-        this.list.querySelectorAll(`input[data-gi="${gi}"]`).forEach((opt) => (opt.checked = cb.checked));
-      } else if (cb.checked) this.selected.add(cb.value);
+      if (cb.checked) this.selected.add(cb.value);
       else this.selected.delete(cb.value);
-      this._syncGroups();
+      cb.closest('.ms-option').setAttribute('aria-selected', String(cb.checked));
       this._emit();
     });
     // Acciones masivas sobre las opciones visibles según la búsqueda
@@ -635,60 +641,24 @@ App.components.MultiSelect = class MultiSelect {
   _visibleOptions() {
     const q = this.query;
     if (!q) return this.options;
-    return this.options.filter((o) => o.label.toLowerCase().includes(q) || (o.group || '').toLowerCase().includes(q));
+    return this.options.filter((o) => o.label.toLowerCase().includes(q));
   }
 
   _renderList() {
     const esc = App.utils.escapeHtml;
     const visibles = this._visibleOptions();
     if (!visibles.length) {
-      this._groups = [];
       this.list.innerHTML = '<p class="px-4 py-3 text-sm text-grey-mid">Sin coincidencias</p>';
       return;
     }
-    // Agrupa conservando el orden de aparición (los grupos quedan contiguos)
-    const byGroup = new Map();
-    for (const o of visibles) {
-      const g = o.group || '';
-      if (!byGroup.has(g)) byGroup.set(g, []);
-      byGroup.get(g).push(o);
-    }
-    this._groups = [...byGroup].map(([name, options]) => ({ name, options }));
-
-    const option = (o, gi) => {
-      const sel = this.selected.has(o.value);
-      return `<label class="ms-option${o.group ? ' pl-8' : ''}" role="option" aria-selected="${sel}">
-          <input type="checkbox" value="${esc(o.value)}" data-gi="${gi}" ${sel ? 'checked' : ''} /><span class="truncate">${esc(o.label)}</span>
-        </label>`;
-    };
-    this.list.innerHTML = this._groups
-      .map(({ name, options }, gi) =>
-        name
-          ? `<div role="group" aria-label="${esc(name)}">
-              <label class="mx-2 mt-2 flex cursor-pointer items-center gap-2 rounded bg-surface px-3 py-1.5 text-xs font-bold text-primary">
-                <input type="checkbox" class="h-[15px] w-[15px] shrink-0 cursor-pointer accent-primary" data-group="${gi}" aria-label="Seleccionar todas las granjas de ${esc(name)}" />
-                <span class="min-w-0 flex-1 truncate">${esc(name)}</span>
-                <span class="num shrink-0 font-semibold text-grey-mid" data-group-count="${gi}"></span>
-              </label>
-              ${options.map((o) => option(o, gi)).join('')}
-            </div>`
-          : options.map((o) => option(o, gi)).join('')
-      )
+    this.list.innerHTML = visibles
+      .map((o) => {
+        const sel = this.selected.has(o.value);
+        return `<label class="ms-option" role="option" aria-selected="${sel}">
+            <input type="checkbox" value="${esc(o.value)}" ${sel ? 'checked' : ''} /><span class="truncate">${esc(o.label)}</span>
+          </label>`;
+      })
       .join('');
-    this._syncGroups();
-  }
-
-  /** Estado de cada cabecera de grupo: marcada, indeterminada o vacía, y su conteo. */
-  _syncGroups() {
-    (this._groups || []).forEach(({ options }, gi) => {
-      const head = this.list.querySelector(`input[data-group="${gi}"]`);
-      if (!head) return;
-      const n = options.reduce((c, o) => c + (this.selected.has(o.value) ? 1 : 0), 0);
-      head.checked = n === options.length;
-      head.indeterminate = n > 0 && n < options.length;
-      this.list.querySelector(`[data-group-count="${gi}"]`).textContent = `${n}/${options.length}`;
-    });
-    this.list.querySelectorAll('.ms-option').forEach((l) => l.setAttribute('aria-selected', String(l.querySelector('input').checked)));
   }
 
   _renderSummary() {
@@ -797,9 +767,13 @@ App.components.DateRange = class DateRange {
  *     encabezado fijo y hover sincronizable. Solo renderiza la página
  *     visible, por lo que es fluida con 16.000 filas.
  *     columns: [{ key, label, align?, type?: 'text', render?(row, pos), sortValue?(row),
- *                 defaultDir?, sortable?: false }]
+ *                 defaultDir?, sortable?: false, headClass?, cellClass?(row, i) }]
  *       render recibe la posición absoluta de la fila según el orden activo:
  *       pos = ((página − 1) × pageSize) + índice + 1  (columnas tipo "#").
+ *       headClass / cellClass: clases extra del <th> / <td> (p. ej. columna fija
+ *       con `sticky left-0`); cellClass recibe el índice visible para alternar fondos.
+ *       Dentro de `label`, un elemento con [data-no-sort] (icono de ayuda) no ordena.
+ *     striped: true            filas alternas (pares en bg-surface)
  *     Opciones de paginación:
  *       pageSize: 10           filas por página (0 = sin paginar)
  *       pagerStyle: 'simple'   "Anterior · Página X de Y · Siguiente" (por defecto: numerado)
@@ -831,7 +805,7 @@ App.components.DataTable = class DataTable {
 
     root.innerHTML = `
       <div class="table-scroll" ${cfg.maxHeight ? `style="max-height:${cfg.maxHeight}px"` : ''}>
-        <table class="data-table"><thead></thead><tbody></tbody></table>
+        <table class="data-table${cfg.striped ? ' data-table--striped' : ''}"><thead></thead><tbody></tbody></table>
       </div>
       ${this.pageSize ? `<nav class="pager ${cfg.pagerClass || ''}" aria-label="Paginación"></nav>` : ''}`;
 
@@ -841,6 +815,7 @@ App.components.DataTable = class DataTable {
     this.pager = root.querySelector('.pager');
 
     this.thead.addEventListener('click', (e) => {
+      if (e.target.closest('[data-no-sort]')) return;
       const th = e.target.closest('th[data-key]');
       if (th) this.sortBy(th.dataset.key);
     });
@@ -874,6 +849,12 @@ App.components.DataTable = class DataTable {
   setColumns(columns) {
     this.columns = columns;
     this._renderHead();
+  }
+
+  /** Cambia el orden activo sin redibujar (se aplica en el próximo setRows). */
+  setSort(key, dir) {
+    this.sortKey = key;
+    this.sortDir = dir;
   }
 
   setRows(rows) {
@@ -944,9 +925,10 @@ App.components.DataTable = class DataTable {
       for (let i = 0; i < this.visible.length; i++) {
         const row = this.visible[i];
         const pos = start + i + 1; // ((página − 1) × pageSize) + índice + 1
-        html += `<tr data-i="${i}">`;
+        html += `<tr class="group" data-i="${i}">`;
         for (const c of this.columns) {
-          html += `<td class="${DataTable.alignClass(c)}">${c.render ? c.render(row, pos) : esc(row[c.key])}</td>`;
+          const cls = c.cellClass ? `${DataTable.alignClass(c)} ${c.cellClass(row, i)}` : DataTable.alignClass(c);
+          html += `<td class="${cls}">${c.render ? c.render(row, pos) : esc(row[c.key])}</td>`;
         }
         html += '</tr>';
       }
@@ -960,12 +942,13 @@ App.components.DataTable = class DataTable {
       '<tr>' +
       this.columns
         .map((c) => {
-          if (c.sortable === false) return `<th class="${DataTable.alignClass(c)}" scope="col">${c.label}</th>`;
+          const extra = c.headClass || '';
+          if (c.sortable === false) return `<th class="${DataTable.alignClass(c)} ${extra}" scope="col">${c.label}</th>`;
           const active = c.key === this.sortKey;
           const aria = active ? (this.sortDir === 'asc' ? 'ascending' : 'descending') : 'none';
-          const cls = [DataTable.alignClass(c), active ? 'is-sorted' : ''].join(' ');
+          const cls = [DataTable.alignClass(c), active ? 'is-sorted' : '', extra].join(' ');
           return `<th data-key="${c.key}" tabindex="0" aria-sort="${aria}" class="${cls}" scope="col">
-              <span class="th-inner">${c.label}<span class="sort-icon">${DataTable.ICONS[active ? this.sortDir : 'none']}</span></span></th>`;
+              <span class="th-inner"><span>${c.label}</span><span class="sort-icon">${DataTable.ICONS[active ? this.sortDir : 'none']}</span></span></th>`;
         })
         .join('') +
       '</tr>';
@@ -1028,6 +1011,66 @@ App.components.DataTable = class DataTable {
   }
 };
 
+/* --------------------------------------------------------------------------
+ * 5.4 Tooltip — globo de ayuda para cualquier elemento con [data-tip].
+ *     Aparece con hover o foco de teclado. Un único globo con posición fija en
+ *     <body>, para que no lo recorten los contenedores con scroll (tablas).
+ *     <span data-tip="Texto" tabindex="0">…</span>
+ * ------------------------------------------------------------------------ */
+App.components.Tooltip = (function () {
+  'use strict';
+  const bubble = document.createElement('div');
+  bubble.id = 'app-tooltip';
+  bubble.className = 'tip-bubble';
+  bubble.setAttribute('role', 'tooltip');
+  bubble.hidden = true;
+  document.body.appendChild(bubble);
+  let current = null;
+
+  function show(el) {
+    current = el;
+    bubble.textContent = el.dataset.tip;
+    bubble.hidden = false;
+    el.setAttribute('aria-describedby', bubble.id);
+    place();
+  }
+
+  /** Bajo el elemento y centrado, sin salirse del viewport. */
+  function place() {
+    if (!current) return;
+    const r = current.getBoundingClientRect();
+    const w = bubble.offsetWidth;
+    const left = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8));
+    Object.assign(bubble.style, { top: `${r.bottom + 8}px`, left: `${left}px` });
+  }
+
+  function hide() {
+    if (current) current.removeAttribute('aria-describedby');
+    current = null;
+    bubble.hidden = true;
+  }
+
+  const target = (e) => (e.target instanceof Element ? e.target.closest('[data-tip]') : null);
+  document.addEventListener('mouseover', (e) => {
+    const el = target(e);
+    if (el === current) return;
+    if (el) show(el);
+    else if (current && current !== document.activeElement) hide();
+  });
+  document.addEventListener('focusin', (e) => {
+    const el = target(e);
+    if (el) show(el);
+    else hide();
+  });
+  document.addEventListener('focusout', hide);
+  // Enfocar con teclado puede desplazar la tabla: el globo sigue al elemento
+  window.addEventListener('scroll', place, true);
+  window.addEventListener('resize', place);
+  document.addEventListener('keydown', (e) => e.key === 'Escape' && hide());
+
+  return { hide };
+})();
+
 /* ==========================================================================
  * 6. FILTROS GLOBALES — fuente única de verdad para todas las vistas.
  * Los controles viven en la barra superior; las vistas se suscriben.
@@ -1044,7 +1087,7 @@ App.filters = (function () {
     desde: D.minDate,
     hasta: D.maxDate,
     plantas: D.plantas.slice(),
-    granjas: D.granjas.map((g) => g.key),
+    granjas: D.granjas.slice(),
   });
 
   const state = defaults();
@@ -1097,8 +1140,9 @@ App.views = {};
 
 /* --------------------------------------------------------------------------
  * 7.1 TABLERO A LA MEDIDA — KPIs + distribución SEUROP en la misma fila,
- *     ranking por granja, SEUROP en el tiempo con tabla sincronizada y
- *     variables físicas con doble eje.
+ *     ranking por granja única (columnas # y Granja fijas en móvil),
+ *     distribución SEUROP con tabla sincronizada y variables físicas con
+ *     doble eje; ambas gráficas alternan el eje X entre tiempo y granja.
  * ------------------------------------------------------------------------ */
 App.views.inicio = (function () {
   'use strict';
@@ -1111,9 +1155,15 @@ App.views.inicio = (function () {
 
   const RANKING_PAGE_SIZE = 10;
 
-  // Estado propio de la vista (solo visual); los filtros viven en App.filters
-  const state = { lines: { peso: true, magro: true, grasa: true } };
+  // Estado propio de la vista (solo visual); los filtros viven en App.filters.
+  // axis: eje X de cada gráfica de barras → 'tiempo' (granularidad activa) | 'granja'
+  const state = { lines: { peso: true, magro: true, grasa: true }, axis: { timeline: 'tiempo', fisicas: 'tiempo' } };
   let dirty = false;
+  let lastAgg = null; // última agregación: cambiar el eje X no vuelve a agregar
+  let periodosMode = 'tiempo'; // modo con el que se configuró el orden de la tabla sincronizada
+
+  const IQ_TIP = 'Indicador de calidad de canal (detalle en próxima versión).';
+  const INFO_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>';
 
   const SERIES = {
     peso: { name: 'Peso promedio (kg)', color: '#dcb3b0', hover: T.primary, unit: 'kg', dec: 1 },
@@ -1152,9 +1202,20 @@ App.views.inicio = (function () {
       <p class="kpi-sub" data-ref="kpi-iq-sub">&nbsp;</p>
     </article>`;
 
-  const cardHeader = (title, sub, extra = '') => `
+  /** Cabecera de tarjeta. refs: { title, sub } → data-ref para textos dinámicos. */
+  const cardHeader = (title, sub, extra = '', refs = {}) => `
     <div class="card-header flex-wrap">
-      <div><h2 class="card-title">${title}</h2><p class="card-subtitle"${sub === null ? ' data-ref="timelineSub"' : ''}>${sub || ''}</p></div>${extra}
+      <div class="min-w-0">
+        <h2 class="card-title"${refs.title ? ` data-ref="${refs.title}"` : ''}>${title}</h2>
+        <p class="card-subtitle"${refs.sub ? ` data-ref="${refs.sub}"` : ''}>${sub || ''}</p>
+      </div>${extra}
+    </div>`;
+
+  /** Selector compacto del eje X (Por tiempo / Por granja) para la gráfica `chart`. */
+  const axisSwitch = (chart) => `
+    <div class="segmented shrink-0" role="group" aria-label="Eje X de la gráfica" data-axis="${chart}">
+      <button type="button" data-mode="tiempo" aria-pressed="true">Por tiempo</button>
+      <button type="button" data-mode="granja" aria-pressed="false">Por granja</button>
     </div>`;
 
   function template() {
@@ -1179,12 +1240,12 @@ App.views.inicio = (function () {
       </div>
 
       <section class="card mb-6">
-        ${cardHeader('Ranking por granja', `Granja operativa (planta - granja) · ${RANKING_PAGE_SIZE} por página · CV peso = σ / μ × 100 · haga clic en un encabezado para reordenar`)}
+        ${cardHeader('Ranking por granja', `Consolidado por granja (todas sus plantas) · ${RANKING_PAGE_SIZE} por página · CV peso = σ / μ × 100 · haga clic en un encabezado para reordenar`)}
         <div class="px-2 pb-2 md:px-3" data-ref="tableRanking"></div>
       </section>
 
       <section class="card mb-6">
-        ${cardHeader('Distribución SEUROP en el tiempo', null)}
+        ${cardHeader('Distribución SEUROP en el tiempo', '', axisSwitch('timeline'), { title: 'timelineTitle', sub: 'timelineSub' })}
         <div class="px-3 md:px-5"><div data-ref="chartTimeline" style="height:380px"></div></div>
         <div class="mt-3 border-t border-line px-2 pb-2 md:px-3" data-ref="tablePeriodos"></div>
       </section>
@@ -1192,11 +1253,15 @@ App.views.inicio = (function () {
       <section class="card">
         ${cardHeader(
           'Evolución de variables físicas',
-          'Peso promedio en barras (eje izquierdo) · % magro y grasa dorsal en líneas (eje derecho)',
-          `<div class="flex flex-wrap items-center gap-2" data-ref="lineToggles" role="group" aria-label="Mostrar u ocultar líneas">
-            <label class="toggle-pill" style="--c:${SERIES.magro.color}"><input type="checkbox" data-line="magro" checked /><span class="dot"></span>% Magro</label>
-            <label class="toggle-pill" style="--c:${SERIES.grasa.color}"><input type="checkbox" data-line="grasa" checked /><span class="dot"></span>Grasa dorsal</label>
-          </div>`
+          '',
+          `<div class="flex flex-wrap items-center gap-2">
+            ${axisSwitch('fisicas')}
+            <div class="flex flex-wrap items-center gap-2" data-ref="lineToggles" role="group" aria-label="Mostrar u ocultar series">
+              <label class="toggle-pill" style="--c:${SERIES.magro.color}"><input type="checkbox" data-line="magro" checked /><span class="dot"></span>% Magro</label>
+              <label class="toggle-pill" style="--c:${SERIES.grasa.color}"><input type="checkbox" data-line="grasa" checked /><span class="dot"></span>Grasa dorsal</label>
+            </div>
+          </div>`,
+          { sub: 'fisicasSub' }
         )}
         <div class="px-3 pb-3 md:px-5"><div data-ref="chartFisicas" style="height:380px"></div></div>
       </section>`;
@@ -1222,6 +1287,20 @@ App.views.inicio = (function () {
       charts.fisicas.dispatchAction({ type: e.target.checked ? 'legendSelect' : 'legendUnSelect', name: SERIES[key].name });
     });
 
+    // Selector de eje X (Por tiempo / Por granja): redibuja solo esa tarjeta, sin reagregar
+    container.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-axis] button[data-mode]');
+      if (!b) return;
+      const group = b.parentElement;
+      const chart = group.dataset.axis;
+      if (state.axis[chart] === b.dataset.mode) return;
+      state.axis[chart] = b.dataset.mode;
+      group.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      if (!lastAgg) return;
+      if (chart === 'timeline') renderTimelineSection(lastAgg);
+      else renderFisicas(lastAgg);
+    });
+
     charts.seurop = C.create(ui.chartSeurop);
     charts.timeline = C.create(ui.chartTimeline);
     charts.fisicas = C.create(ui.chartFisicas);
@@ -1236,13 +1315,14 @@ App.views.inicio = (function () {
       columns: rankingColumns(),
       sortKey: 'count',
       sortDir: 'desc',
+      striped: true, // las celdas fijas alternan fondo igual que el resto de la fila
       pageSize: RANKING_PAGE_SIZE,
       pagerStyle: 'simple',
       pagerClass: 'mt-3 mb-1 rounded-[20px] border border-line bg-surface px-4',
       unit: 'granjas',
     });
     tables.periodos = new DataTable(ui.tablePeriodos, {
-      columns: periodColumns(),
+      columns: periodColumns('tiempo'),
       sortKey: 'key',
       sortDir: 'asc',
       maxHeight: 340,
@@ -1258,18 +1338,47 @@ App.views.inicio = (function () {
     dirty = false;
     const agg = D.aggregate(F.rows(), F.state.gran);
 
-    renderKpis(agg);
-    renderSeuropBar(agg.total);
-
     const maxCount = agg.granjas.reduce((m, g) => Math.max(m, g.count), 0);
     agg.granjas.forEach((g) => (g.share = maxCount ? g.count / maxCount : 0));
+    // Eje X "Por granja": de mayor a menor volumen de canales; idx = posición en la gráfica
+    agg.granjasPorVolumen = agg.granjas
+      .slice()
+      .sort((a, b) => b.count - a.count || DataTable.collator.compare(a.nombre, b.nombre))
+      .map((g, idx) => Object.assign(g, { idx }));
+    lastAgg = agg;
+
+    renderKpis(agg);
+    renderSeuropBar(agg.total);
     tables.ranking.setRows(agg.granjas);
-
-    renderTimeline(agg);
-    tables.periodos.setColumns(periodColumns());
-    tables.periodos.setRows(agg.periodos);
-
+    renderTimelineSection(agg);
     renderFisicas(agg);
+  }
+
+  /* ---------- Eje X dinámico (tiempo / granja) ---------------------------- */
+
+  /** Categorías del eje X según el modo: periodos de la granularidad activa o granjas por volumen. */
+  function xData(mode, agg) {
+    if (mode === 'granja') {
+      const items = agg.granjasPorVolumen;
+      return { byGranja: true, items, labels: items.map((g) => g.nombre) };
+    }
+    const gran = F.state.gran;
+    return { byGranja: false, items: agg.periodos, labels: agg.periodos.map((p) => U.periodLabel(gran, p.key)) };
+  }
+
+  /** Eje de categorías: con granjas, etiquetas inclinadas y truncadas para que todas se lean. */
+  function xAxisFor(x) {
+    const axis = C.categoryAxis(x.labels);
+    if (x.byGranja) axis.axisLabel = { ...axis.axisLabel, interval: 0, rotate: 35, width: 110, overflow: 'truncate', hideOverlap: false };
+    return axis;
+  }
+
+  /**
+   * dataZoom: con granjas, tantas barras visibles como quepan (~56 px por
+   * etiqueta), empezando por las de mayor volumen; con tiempo, los periodos recientes.
+   */
+  function zoomForX(x, chart) {
+    return x.byGranja ? C.zoomFor(x.items.length, Math.max(6, Math.floor(chart.getWidth() / 56)), true) : C.zoomFor(x.items.length);
   }
 
   /* ---------- KPIs --------------------------------------------------------- */
@@ -1278,7 +1387,7 @@ App.views.inicio = (function () {
     const t = agg.total;
     const { desde, hasta } = F.state;
     ui['kpi-granjas'].textContent = U.fmt(agg.granjas.length);
-    ui['kpi-granjas-sub'].textContent = `de ${U.fmt(D.granjas.length)} granjas operativas (planta - granja)`;
+    ui['kpi-granjas-sub'].textContent = `de ${U.fmt(D.granjas.length)} granjas`;
     ui['kpi-canales'].textContent = U.fmt(t.count);
     ui['kpi-canales-sub'].textContent = `${U.formatDate(desde)} – ${U.formatDate(hasta)}`;
 
@@ -1366,15 +1475,34 @@ App.views.inicio = (function () {
 
   /* ---------- Tablas ------------------------------------------------------- */
 
+  /*
+   * Columnas fijas del ranking (# y Granja): al desplazar la tabla en horizontal
+   * (móvil) quedan visibles. Fondo explícito según la fila (impar bg-white, par
+   * bg-surface, igual que .data-table--striped) y borde derecho en la última
+   * fija, para que las demás columnas no se vean por debajo.
+   */
+  const POS_W = 'w-[3.25rem] min-w-[3.25rem] max-w-[3.25rem]';
+  const stickyBg = (i) => `${i % 2 ? 'bg-surface' : 'bg-white'} group-hover:bg-row-hover`;
+
   function rankingColumns() {
     return [
       // Posición según el orden activo; continúa entre páginas (11–20 en la página 2…)
-      { key: 'pos', label: '#', align: 'right', sortable: false, render: (r, pos) => `<span class="num font-semibold text-grey-mid">${U.fmt(pos)}</span>` },
+      {
+        key: 'pos',
+        label: '#',
+        align: 'right',
+        sortable: false,
+        headClass: `sticky left-0 z-20 bg-surface ${POS_W}`,
+        cellClass: (r, i) => `sticky left-0 z-10 ${POS_W} ${stickyBg(i)}`,
+        render: (r, pos) => `<span class="num font-semibold text-grey-mid">${U.fmt(pos)}</span>`,
+      },
       {
         key: 'nombre',
         label: 'Granja',
         type: 'text',
-        render: (r) => `<div class="font-semibold text-ink">${U.escapeHtml(r.nombre)}</div><div class="text-xs text-grey-mid">${U.escapeHtml(r.planta)}</div>`,
+        headClass: 'sticky left-[calc(3.25rem_-_1px)] z-20 bg-surface border-r border-line',
+        cellClass: (r, i) => `sticky left-[calc(3.25rem_-_1px)] z-10 border-r border-line ${stickyBg(i)}`,
+        render: (r) => `<div class="max-w-[9.5rem] truncate font-semibold text-ink sm:max-w-[16rem]" title="${U.escapeHtml(r.nombre)}">${U.escapeHtml(r.nombre)}</div>`,
       },
       {
         key: 'count',
@@ -1396,7 +1524,13 @@ App.views.inicio = (function () {
       },
       { key: 'magroProm', label: 'Promedio % magro', align: 'right', render: (r) => U.fmtPct(r.magroProm, 2) },
       { key: 'grasaProm', label: 'Promedio grasa dorsal (mm)', align: 'right', render: (r) => U.fmt(r.grasaProm, 1) },
-      { key: 'iqProm', label: 'IQ-Col promedio', align: 'right', render: (r) => U.fmt(r.iqProm, 1) },
+      {
+        key: 'iqProm',
+        // Icono de ayuda: muestra el globo (App.components.Tooltip) y no reordena la columna
+        label: `IQ-Col promedio<span class="info-tip" tabindex="0" data-no-sort data-tip="${IQ_TIP}" aria-label="Qué es el IQ-Col promedio">${INFO_SVG}</span>`,
+        align: 'right',
+        render: (r) => U.fmt(r.iqProm, 1),
+      },
       // Orden por jerarquía de calidad (S → P), no alfabético
       { key: 'seuTop', label: 'Cat. SEUROP', align: 'center', defaultDir: 'asc', render: (r) => seuropLetterBox(r.seuTop) },
     ];
@@ -1409,9 +1543,14 @@ App.views.inicio = (function () {
       style="background-color:${s.color}" title="${s.letter} · ${s.key}" aria-label="Categoría ${s.letter} (${s.key})">${s.letter}</span>`;
   }
 
-  function periodColumns() {
+  /** Columnas de la tabla sincronizada: la primera es el Periodo o la Granja según el eje X. */
+  function periodColumns(mode) {
+    const first =
+      mode === 'granja'
+        ? { key: 'key', label: 'Granja', type: 'text', render: (r) => `<span class="font-semibold">${U.escapeHtml(r.nombre)}</span>` }
+        : { key: 'key', label: `Periodo (${U.granLabel(F.state.gran)})`, type: 'text', render: (r) => `<span class="font-semibold">${U.periodLabel(F.state.gran, r.key)}</span>` };
     return [
-      { key: 'key', label: `Periodo (${U.granLabel(F.state.gran)})`, type: 'text', render: (r) => `<span class="font-semibold">${U.periodLabel(F.state.gran, r.key)}</span>` },
+      first,
       { key: 'count', label: 'Cantidad de canales', align: 'right', render: (r) => U.fmt(r.count) },
       { key: 'pesoProm', label: 'Promedio peso (kg)', align: 'right', render: (r) => U.fmt(r.pesoProm, 1) },
       { key: 'magroProm', label: 'Promedio % magro', align: 'right', render: (r) => U.fmtPct(r.magroProm, 2) },
@@ -1422,31 +1561,49 @@ App.views.inicio = (function () {
     ];
   }
 
-  /** Hover en la tabla de periodos → tooltip del mismo periodo en el gráfico. */
+  /** Hover en la tabla sincronizada → tooltip del mismo periodo/granja en el gráfico. */
   function highlightPeriod(row) {
     if (!row) return charts.timeline.dispatchAction({ type: 'hideTip' });
     charts.timeline.dispatchAction({ type: 'showTip', seriesIndex: 0, dataIndex: row.idx });
   }
 
-  /* ---------- SEUROP en el tiempo (barras apiladas 100%) ------------------ */
+  /* ---------- Distribución SEUROP (barras apiladas 100%) + tabla ----------- */
+
+  function renderTimelineSection(agg) {
+    const mode = state.axis.timeline;
+    renderTimeline(agg);
+    // Al cambiar de eje, la tabla adopta el orden de la gráfica (periodo asc / volumen desc)
+    if (mode !== periodosMode) {
+      tables.periodos.setSort(mode === 'granja' ? 'count' : 'key', mode === 'granja' ? 'desc' : 'asc');
+      periodosMode = mode;
+    }
+    tables.periodos.setColumns(periodColumns(mode));
+    tables.periodos.setRows(mode === 'granja' ? agg.granjasPorVolumen : agg.periodos);
+  }
 
   function renderTimeline(agg) {
-    const P = agg.periodos;
-    const gran = F.state.gran;
-    ui.timelineSub.textContent = `Composición porcentual por ${U.granLabel(gran).toLowerCase()} · las categorías de mayor volumen se ubican en la base de cada barra`;
+    const x = xData(state.axis.timeline, agg);
+    const P = x.items;
+    const labels = x.labels;
+    if (x.byGranja) {
+      ui.timelineTitle.textContent = 'Distribución SEUROP por granja';
+      ui.timelineSub.textContent = 'Composición porcentual por granja, de mayor a menor volumen de canales · las categorías de mayor volumen se ubican en la base de cada barra';
+    } else {
+      ui.timelineTitle.textContent = 'Distribución SEUROP en el tiempo';
+      ui.timelineSub.textContent = `Composición porcentual por ${U.granLabel(F.state.gran).toLowerCase()} · las categorías de mayor volumen se ubican en la base de cada barra`;
+    }
     if (!P.length) return C.setEmpty(charts.timeline);
 
     // La primera serie del stack queda en la base → orden por volumen total desc
     const order = U.SEUROP.map((_, i) => i).sort((a, b) => agg.total.seu[b] - agg.total.seu[a]);
-    const labels = P.map((p) => U.periodLabel(gran, p.key));
-    const zoom = C.zoomFor(P.length);
+    const zoom = zoomForX(x, charts.timeline);
 
     charts.timeline.setOption(
       {
         textStyle: C.textStyle,
         animationDuration: 450,
         legend: { ...C.legend, data: U.SEUROP.map((s) => s.key) },
-        grid: { left: 4, right: 8, top: 40, bottom: zoom ? 44 : 4, containLabel: true },
+        grid: { left: x.byGranja ? 40 : 4, right: 8, top: 40, bottom: zoom ? 44 : 4, containLabel: true },
         tooltip: {
           ...C.tooltip,
           trigger: 'axis',
@@ -1461,7 +1618,7 @@ App.views.inicio = (function () {
             return html;
           },
         },
-        xAxis: C.categoryAxis(labels),
+        xAxis: xAxisFor(x),
         yAxis: {
           type: 'value',
           min: 0,
@@ -1489,22 +1646,27 @@ App.views.inicio = (function () {
   /* ---------- Variables físicas (barras + líneas, doble eje Y) ------------ */
 
   function renderFisicas(agg) {
-    const P = agg.periodos;
+    const x = xData(state.axis.fisicas, agg);
+    const P = x.items;
+    const labels = x.labels;
+    ui.fisicasSub.textContent = x.byGranja
+      ? 'Peso promedio en barras (eje izquierdo) · % magro y grasa dorsal en puntos (eje derecho) · granjas de mayor a menor volumen'
+      : 'Peso promedio en barras (eje izquierdo) · % magro y grasa dorsal en líneas (eje derecho)';
     if (!P.length) return C.setEmpty(charts.fisicas);
 
-    const labels = P.map((p) => U.periodLabel(F.state.gran, p.key));
-    const zoom = C.zoomFor(P.length);
-    const showSymbol = P.length <= 60;
+    const zoom = zoomForX(x, charts.fisicas);
+    const showSymbol = x.byGranja || P.length <= 60;
 
+    // Con granjas no hay continuidad entre categorías: % magro y grasa se ven como puntos sin línea
     const line = (key, field) => ({
       name: SERIES[key].name,
       type: 'line',
       yAxisIndex: 1,
       smooth: 0.3,
       symbol: 'circle',
-      symbolSize: 7,
+      symbolSize: x.byGranja ? 9 : 7,
       showSymbol,
-      lineStyle: { width: 2.5 },
+      lineStyle: { width: x.byGranja ? 0 : 2.5 },
       itemStyle: { color: SERIES[key].color, borderColor: '#fff', borderWidth: 1.5 },
       emphasis: { focus: 'series' },
       data: P.map((p) => +p[field].toFixed(2)),
@@ -1519,7 +1681,7 @@ App.views.inicio = (function () {
           data: Object.values(SERIES).map((s) => s.name),
           selected: Object.fromEntries(Object.keys(SERIES).map((k) => [SERIES[k].name, state.lines[k]])),
         },
-        grid: { left: 4, right: 4, top: 58, bottom: zoom ? 44 : 4, containLabel: true },
+        grid: { left: x.byGranja ? 40 : 4, right: 4, top: 58, bottom: zoom ? 44 : 4, containLabel: true },
         tooltip: {
           ...C.tooltip,
           trigger: 'axis',
@@ -1534,7 +1696,7 @@ App.views.inicio = (function () {
             return html;
           },
         },
-        xAxis: C.categoryAxis(labels),
+        xAxis: xAxisFor(x),
         yAxis: [
           {
             type: 'value',
@@ -1876,22 +2038,27 @@ App.views.scores = (function () {
   /* ---------- Filtros globales de la barra superior ----------------------- */
 
   const plantaOptions = () => D.plantas.map((p) => ({ value: p, label: p }));
-  function granjaOptions(plantas) {
-    const set = new Set(plantas);
-    return D.granjas.filter((g) => set.has(g.planta)).map((g) => ({ value: g.key, label: g.nombre, group: g.planta }));
-  }
+  /** Lista plana de granjas únicas (alfabética) con registros en las plantas elegidas. */
+  const granjaOptions = (plantas) => D.granjasDePlantas(plantas).map((g) => ({ value: g, label: g }));
 
   function mountFilters() {
+    // Fila 1: filtros de datos · Fila 2: agrupación temporal (solo visualización)
     shell.filters.innerHTML = `
-      <div class="segmented shrink-0" role="group" aria-label="Agrupación temporal" data-ref="gran">
-        ${U.GRANULARIDADES.map((g) => `<button type="button" data-gran="${g.key}">${g.label}</button>`).join('')}
+      <div class="flex items-center gap-2">
+        <div class="w-[10rem]" data-ref="plantas"></div>
+        <div class="w-[11.5rem]" data-ref="granjas"></div>
+        <div data-ref="range"></div>
+        <button type="button" class="btn-ghost shrink-0" data-ref="reset" title="Restablecer filtros" aria-label="Restablecer filtros">
+          <i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i>
+        </button>
       </div>
-      <div data-ref="range"></div>
-      <div class="w-[10rem]" data-ref="plantas"></div>
-      <div class="w-[11.5rem]" data-ref="granjas"></div>
-      <button type="button" class="btn-ghost shrink-0" data-ref="reset" title="Restablecer filtros" aria-label="Restablecer filtros">
-        <i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i>
-      </button>`;
+      <div class="flex items-center gap-2">
+        <span class="shrink-0 text-[0.72rem] font-semibold text-grey-mid" id="gran-label"
+              title="Cambia cómo se agrupan los gráficos en el tiempo; no filtra los datos">Agrupar tiempo por:</span>
+        <div class="segmented shrink-0" role="group" aria-labelledby="gran-label" data-ref="gran">
+          ${U.GRANULARIDADES.map((g) => `<button type="button" data-gran="${g.key}">${g.label}</button>`).join('')}
+        </div>
+      </div>`;
     const ref = (k) => shell.filters.querySelector(`[data-ref="${k}"]`);
     const granGroup = ref('gran');
     const s = F.state;

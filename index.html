@@ -32,6 +32,7 @@
         --color-line: #ece7e3;
         --color-surface: #fbfaf9;
         --color-bg: #f7f5f3;
+        --color-row-hover: #faf3f2;  /* primary-soft 55% sobre blanco: hover de filas de tabla */
 
         --color-good: #2f8f6b;       --color-good-soft: #e4f1eb;
         --color-warn: #c9821f;       --color-warn-soft: #f8ecd8;
@@ -153,7 +154,8 @@
         .data-table th.is-sorted .sort-icon { opacity: 1; }
         .data-table tbody td { padding: .65rem .9rem; border-bottom: 1px solid var(--color-line); color: var(--color-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
         .data-table tbody tr:last-child td { border-bottom: 0; }
-        .data-table tbody tr:hover td { background: color-mix(in srgb, var(--color-primary-soft) 55%, white); }
+        .data-table--striped tbody tr:nth-child(even) td { background: var(--color-surface); }
+        .data-table tbody tr:hover td { background: var(--color-row-hover); }
         .data-table tfoot td { padding: .7rem .9rem; border-top: 1px solid var(--color-line); background: var(--color-surface); font-weight: 700; color: var(--color-ink); font-variant-numeric: tabular-nums; }
         .data-table .is-right { text-align: right; }
         .data-table .is-center { text-align: center; }
@@ -174,6 +176,15 @@
         .pager-controls button.is-current { background: var(--color-primary); color: #fff; }
         .pager-controls button:disabled { opacity: .35; cursor: not-allowed; }
         .pager-controls .ellipsis { padding: 0 .25rem; color: var(--color-grey-mid); }
+
+        /* --- Ayuda contextual: icono (i) en encabezados + globo flotante (App.components.Tooltip) --- */
+        .info-tip { display: inline-flex; vertical-align: -2px; margin-left: .3rem; border-radius: 999px; color: var(--color-grey-mid); cursor: help; }
+        .info-tip:hover, .info-tip:focus-visible { color: var(--color-primary); }
+        .tip-bubble {
+          position: fixed; z-index: 70; max-width: 240px; padding: .45rem .65rem; border-radius: 10px; pointer-events: none;
+          background: var(--color-ink); color: #f3efed; font-size: .74rem; font-weight: 500; line-height: 1.4; letter-spacing: normal; text-transform: none;
+          box-shadow: 0 10px 24px #2a211f33;
+        }
 
         /* --- Badges --- */
         .badge { display: inline-flex; align-items: center; gap: .4rem; padding: .2rem .62rem; border-radius: 999px; font-size: .72rem; font-weight: 700; white-space: nowrap; }
@@ -271,8 +282,9 @@
             </button>
           </div>
 
-          <!-- Título a la izquierda y filtros a la derecha cuando hay ancho suficiente; en dos filas si no -->
-          <div class="flex flex-col gap-3 min-[1680px]:flex-row min-[1680px]:items-center min-[1680px]:gap-6">
+          <!-- Título a la izquierda y filtros a la derecha cuando hay ancho suficiente; en dos filas si no.
+               Los filtros tienen dos líneas: datos (planta, granja, fechas) y, debajo, la agrupación temporal. -->
+          <div class="flex flex-col gap-3 min-[1440px]:flex-row min-[1440px]:items-center min-[1440px]:gap-6">
             <div class="flex min-w-0 shrink-0 items-center gap-3">
               <button type="button" class="btn-ghost hidden shrink-0 lg:inline-flex" data-shell="sidebar-toggle" aria-controls="sidebar" aria-expanded="true" aria-label="Ocultar menú lateral" title="Ocultar menú lateral">
                 <i data-lucide="panel-left-close" class="h-4 w-4" data-icon="close"></i>
@@ -284,7 +296,7 @@
               </div>
             </div>
             <div class="scroll-fade no-scrollbar min-w-0 flex-1 overflow-x-auto" role="region" aria-label="Filtros globales" data-shell="filters-scroll">
-              <div class="flex w-max items-center gap-2 py-0.5 min-[1680px]:ml-auto" data-shell="filters"></div>
+              <div class="flex w-max flex-col items-start gap-2 py-0.5 min-[1440px]:ml-auto" data-shell="filters"></div>
             </div>
           </div>
         </header>

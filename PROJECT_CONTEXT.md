@@ -72,33 +72,62 @@ Los mensajes avanzan por etapas: "Cargando información del sistema..." → "Obt
 
 | Ruta | Contenido |
 |---|---|
-| `#inicio` | KPIs, distribución SEUROP, **Ranking por granja** (paginado de 10 en 10, con posición `#` y CV Peso), SEUROP en el tiempo y evolución de variables físicas. |
+| `#inicio` | KPIs, distribución SEUROP, **Ranking por granja** (paginado de 10 en 10, con posición `#`, CV Peso y columnas fijas en móvil), Distribución SEUROP y evolución de variables físicas, ambas con **selector de Eje X** (tiempo / granja). |
 | `#despacho` | Dispersión peso vs. % magro por clase SEUROP y detalle paginado de canales. |
 | `#scores` | En construcción ("Próximamente"). La versión anterior está en el commit `7859625`. |
 
-Los filtros del header (fechas, planta, granja, granularidad) viven en `App.filters`; cada vista se suscribe y se recalcula en tiempo real sobre los registros cargados desde S3.
+Los filtros del header (planta, granja, fechas y granularidad) viven en `App.filters`; cada vista se suscribe y se recalcula en tiempo real sobre los registros cargados desde S3.
 
-### Granja operativa (clave compuesta Planta - Granja)
+### Header: filtros en dos líneas
 
-Una **granja operativa** es la relación entre una planta y una granja: `` `${planta} - ${granja}` `` (`App.data.granjaKey`). Si la misma granja entrega a tres plantas, cuenta como **tres** granjas operativas. Con el dataset actual hay **294 combinaciones** planta - granja (62 nombres de granja distintos).
+La zona de filtros (`[data-shell="filters"]`, armada por `mountFilters()` en `app.js`) tiene dos filas, dentro del mismo contenedor con scroll horizontal (`.scroll-fade`) para pantallas angostas:
 
-- `data_loader.js` arma `catalogos.granjas` con una entrada por cada par planta/granja; `app.js` le añade `key` y lo ordena por planta y luego por granja.
-- Cada registro recibe `_gk` (la clave compuesta). El filtro de granjas (`App.filters.state.granjas`) guarda **claves compuestas**, no nombres.
-- El KPI "Granjas activas" muestra cuántas granjas operativas tienen canales en la selección, sobre el total del catálogo (`de N granjas operativas`).
-- El **Ranking por granja** tiene una fila por granja operativa: nombre de la granja con su planta debajo.
+1. **Filtros de datos:** Planta, Granja, Rango de fechas (atajo + desde → hasta) y el botón de restablecer.
+2. **Agrupación temporal:** la etiqueta *"Agrupar tiempo por:"* (`text-[0.72rem] font-semibold text-grey-mid`) seguida del control segmentado `Día · Semana · Mes · Trimestre · Año`. La etiqueta deja claro que esto solo cambia cómo se agrupan los gráficos en el tiempo; no filtra datos (cambiar la granularidad no vuelve a filtrar: `App.filters.set({ gran })` no incrementa `dataVersion`).
 
-### Ranking por granja: paginación e índice
+Desde 1440 px de ancho (`min-[1440px]:`) el título queda a la izquierda y el bloque de filtros a la derecha; por debajo, el título va arriba y los filtros debajo.
 
+### Granjas únicas (identidad por nombre)
+
+Una granja se identifica **solo por su nombre**. Si la misma granja entrega a tres plantas, es **una** granja y sus canales se consolidan. (Hasta la versión anterior se usaba la clave compuesta `Planta - Granja`; esa lógica se eliminó.)
+
+- `data_loader.js` sigue armando `catalogos.granjas` con un par `{ nombre, planta }` por cada combinación. `app.js` lo usa solo para construir `plantasPorGranja` (nombre → plantas con registros).
+- `App.data.granjas` es la lista de **nombres únicos**, ordenada alfabéticamente (`Intl.Collator('es')`). `App.data.granjasDePlantas(plantas)` devuelve las granjas únicas con registros en al menos una de esas plantas.
+- `App.filters.state.granjas` guarda **nombres de granja**. `App.data.filter()` exige que el registro cumpla planta **y** granja, así que con plantas parciales una granja multiplanta solo aporta los canales de las plantas elegidas.
+- El KPI "Granjas activas" muestra cuántas granjas únicas tienen canales en la selección, sobre el total (`de N granjas`).
+- `App.data.aggregate()` agrupa `granjas` por nombre: una entrada por granja, con todas sus plantas consolidadas.
+
+### Filtro de granjas (lista plana)
+
+- `MultiSelect` muestra una lista **plana** de nombres únicos de granja, en orden alfabético, con búsqueda por nombre, "Seleccionar todo" y "Limpiar" (estas dos actúan sobre las opciones visibles).
+- **Reactividad cruzada:** al cambiar el filtro de plantas, la lista se restringe a `granjasDePlantas(plantasSeleccionadas)` (`cascadeGranjas()` en el shell). Conserva las granjas que ya estaban marcadas y marca las que aparecen por primera vez.
+- El resumen del disparador ("Todas (N)", "k de N") cuenta granjas únicas.
+
+### Ranking por granja
+
+- **Una fila por granja única** (consolida todas sus plantas). "Cat. SEUROP" es la clase predominante (moda) de la granja y CV Peso se calcula sobre todos sus canales.
 - **10 granjas por página** (`RANKING_PAGE_SIZE` en `App.views.inicio`). La paginación inferior usa la variante `pagerStyle: 'simple'` de `DataTable`: "‹ Anterior", "Página X de Y", "Siguiente ›" y el rango "1–10 de N granjas", dentro de un contenedor `rounded-[20px] border border-line bg-surface`.
 - **Columna `#`** (primera a la izquierda, no ordenable): la posición según el orden activo (por defecto, más canales primero). Continúa entre páginas: `((paginaActual − 1) × 10) + índice + 1`, así que la página 2 va de 11 a 20. `DataTable` pasa esa posición como segundo argumento de `render(row, pos)`.
 - Al reordenar o cambiar un filtro, la tabla vuelve a la página 1 y la numeración se recalcula.
+- **Columnas fijas (móvil):** la tabla vive en `.table-scroll` (scroll horizontal). Las columnas `#` (`sticky left-0`, ancho fijo `3.25rem`) y **Granja** (`sticky left-[calc(3.25rem_-_1px)]`, 1 px de solape para tapar la costura) quedan fijas al deslizar. Las celdas tienen `z-10` y los `<th>` `z-20 bg-surface`. El fondo es explícito: `bg-white` en filas impares y `bg-surface` en pares (la tabla usa `striped: true`, así que toda la fila alterna igual) y `group-hover:bg-row-hover` para acompañar el hover de la fila. La columna Granja lleva `border-r border-line` y trunca nombres largos (`max-w-[9.5rem]`, `sm:max-w-[16rem]`, nombre completo en `title`).
+- **Ayuda en "IQ-Col promedio":** icono `info` (SVG de Lucide en línea) junto al encabezado. Con hover o foco muestra el globo *"Indicador de calidad de canal (detalle en próxima versión)."* El icono lleva `data-no-sort`: hacer clic sobre él no reordena la columna.
 
-### Filtro de granjas (multiselect agrupado)
+### Selector de Eje X (Distribución SEUROP y Variables físicas)
 
-- Las opciones se agrupan por planta. Cada planta tiene una cabecera (`bg-surface text-primary`) con una casilla que marca o desmarca todas sus granjas, con estado indeterminado si solo hay algunas, y el conteo `seleccionadas/total`.
-- Las granjas aparecen indentadas bajo su planta.
-- La búsqueda filtra por nombre de granja o de planta. "Seleccionar todo" / "Limpiar" y la casilla de cada planta actúan sobre las opciones visibles.
-- Al cambiar el filtro de plantas, la lista de granjas se restringe a esas plantas y conserva las selecciones previas.
+Cada tarjeta tiene en su cabecera un control segmentado `Por tiempo · Por granja` (`[data-axis="timeline"|"fisicas"]`). El estado vive en `App.views.inicio` (`state.axis`), es independiente por tarjeta y no toca `App.filters`. Cambiarlo redibuja solo esa tarjeta, reutilizando la última agregación (`lastAgg`).
+
+- **Por tiempo:** categorías = periodos de la granularidad activa (comportamiento original; el `dataZoom` muestra los periodos más recientes).
+- **Por granja:** categorías = `agg.granjasPorVolumen` (granjas filtradas, de mayor a menor número de canales). Las etiquetas se inclinan 35° y se truncan a 110 px. Si hay más granjas de las que caben (~56 px por barra según `chart.getWidth()`), se activa `dataZoom` (slider + rueda) **desde el inicio**, es decir, desde las granjas de mayor volumen (`App.charts.zoomFor(n, visibles, fromStart = true)`).
+- En **Distribución SEUROP**, el título cambia a "Distribución SEUROP por granja" y la tabla sincronizada cambia su primera columna de `Periodo (…)` a `Granja`, con orden inicial por cantidad de canales (desc). Al volver a "Por tiempo", vuelve a `Periodo` en orden ascendente (`DataTable.setSort`). El hover de la tabla sigue resaltando la barra correspondiente (`idx`).
+- En **Variables físicas**, por granja, % magro y grasa dorsal se dibujan como **puntos sin línea**: entre granjas no hay continuidad que una línea pueda sugerir.
+- Los colores salen de `App.tokens` / paleta SEUROP. Los gráficos se reajustan con `ResizeObserver` → `chart.resize()` y en `onShow()` de la vista.
+
+### Componentes reutilizables (`App.components`)
+
+- `MultiSelect`: lista plana con búsqueda (sin agrupación).
+- `DateRange`: atajo + desde → hasta.
+- `DataTable`: orden, paginación y hover sincronizable. Por columna acepta `headClass` y `cellClass(row, i)` (clases extra, p. ej. columnas fijas); por tabla, `striped`. También tiene `setSort(key, dir)`.
+- `Tooltip`: un único globo con posición fija en `<body>` para cualquier elemento con `[data-tip]` (hover o foco; `Esc` lo cierra). Al estar fuera de la tabla, `overflow` no lo recorta. Estilos `.info-tip` y `.tip-bubble` en `index.html`.
 
 ---
 
@@ -143,7 +172,7 @@ Cada fila del Parquet (una canal) se convierte en un objeto. Los nombres de colu
 
 ### Campos derivados en `app.js`
 
-`iq_col`, `clasificacion_seurop`, `_iq`, `_seu`, la clave de granja operativa `_gk` (`'Planta - Granja'`) y las claves de periodo `_dia`, `_semana`, `_mes`, `_trimestre`, `_anio`.
+`iq_col`, `clasificacion_seurop`, `_iq`, `_seu` y las claves de periodo `_dia`, `_semana`, `_mes`, `_trimestre`, `_anio`. La granja se identifica directamente por `granja` (nombre único); ya no existe la clave compuesta `_gk`.
 
 ---
 
@@ -172,11 +201,11 @@ Rangos de peso: `bajo` (< 60), `a.60<=70kg`, `b.>70<=80kg`, `c.>80<=90kg`, `d.>9
 | O · Menos bueno | 13,32 – < 43,44 |
 | P · Baja | < 13,32 |
 
-En el ranking, "Cat. SEUROP" es la clase predominante (moda) de la granja operativa.
+En el ranking, "Cat. SEUROP" es la clase predominante (moda) de la granja (todas sus plantas).
 
 ### CV Peso (%) — Ranking por granja
 
-Se calcula por granja operativa (planta - granja).
+Se calcula por granja única, sobre todos sus canales en las plantas filtradas.
 
 ```
 CV = Stdev(peso_kg) / Avg(peso_kg) × 100
