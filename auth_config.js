@@ -15,5 +15,6 @@ window.ALLOWED_EMAILS = [
   'luisa.barbosa@alura.bio',
   'julio.botero@alura.bio',
   'jose.giraldo@alura.bio',
-  'juanpedrof@premexcorp.com'
+  'juanpedrof@premexcorp.com',
+  'carlos.andres@cipa.com.co',
 ];
