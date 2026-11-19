@@ -8,15 +8,20 @@
  *      Parquet (ETag + URLs firmadas), descarga cada archivo y lo parsea.
  *      Los archivos se guardan en IndexedDB y solo se vuelven a descargar
  *      cuando cambia el ETag. Si S3 falla pero hay copia guardada, se usa.
+ *      Descarga y lee en paralelo el archivo principal y el complementario
+ *      (additional_data_cipa.parquet); este último es opcional y nunca bloquea.
  *   3. sanitizeRecords(): valida tipos, descarta registros sin campos
  *      obligatorios y normaliza números y fechas.
- *   4. Publica window.DASHBOARD_DATA y carga app.js (una sola vez).
+ *   4. joinAdditional(): LEFT JOIN en memoria con el complementario (Efege por
+ *      Fecha + Turno; las demás plantas por Lote) y recálculo del tiempo de espera.
+ *   5. Publica window.DASHBOARD_DATA y carga app.js (una sola vez).
  *
  * Estados de UI (marcado en index.html): [data-status="loading"],
  * [data-status="error"] con "Reintentar conexión" y [data-shell="notice"].
  *
  * Pruebas locales sin S3: ?archivo=data/canales.parquet lee un Parquet
- * servido junto al sitio (data/ no se versiona).
+ * servido junto al sitio (data/ no se versiona); &complemento=data/additional_data_cipa.parquet
+ * añade el complementario.
  *
  * Requiere (cargados antes): config.js, auth.js, data_utils.js, seurop_quartiles.js.
  * ========================================================================== */
@@ -28,6 +33,9 @@ const CFG = Object.assign(
   {
     DATA_API_URL: '/api/canales',
     REQUEST_TIMEOUT_MS: 30000,
+    ADDITIONAL_TIMEOUT_MS: 15000,
+    MAIN_PARQUET: 'alura_carcasses_cipa_in_house.parquet',
+    ADDITIONAL_PARQUET: 'additional_data_cipa.parquet',
     TIMEZONE: 'UTC',
     DEFAULT_COUNTRY: 'Colombia',
     COLUMN_MAP: {},
@@ -129,15 +137,15 @@ function showNotice(text) {
 /* ---------- Red ------------------------------------------------------------ */
 
 /** fetch con tiempo límite; convierte cada falla en un LoadError con su etapa. */
-async function fetchOk(url, stage) {
+async function fetchOk(url, stage, timeoutMs = CFG.REQUEST_TIMEOUT_MS) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), CFG.REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let resp;
   try {
     resp = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
   } catch (e) {
     const timeout = e && e.name === 'AbortError';
-    throw new LoadError(timeout ? `Sin respuesta en ${CFG.REQUEST_TIMEOUT_MS / 1000} s` : 'Falló la conexión', {
+    throw new LoadError(timeout ? `Sin respuesta en ${timeoutMs / 1000} s` : 'Falló la conexión', {
       kind: timeout ? 'timeout' : 'network',
       stage,
       cause: e,
@@ -254,16 +262,45 @@ async function readParquet(buffer, name) {
   }
 }
 
-/** Parsea varios archivos y concatena sus filas. */
-async function readAllParquet(files) {
+/** Parsea varios archivos y concatena sus filas. `quiet` evita pisar el mensaje de carga (lectura en paralelo). */
+async function readAllParquet(files, quiet = false) {
   const rows = [];
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
-    showLoading(files.length > 1 ? `Procesando datos (${i + 1} de ${files.length})...` : 'Procesando datos...');
+    if (!quiet) showLoading(files.length > 1 ? `Procesando datos (${i + 1} de ${files.length})...` : 'Procesando datos...');
     const part = await readParquet(f.buffer, f.key.split('/').pop());
     for (const r of part) rows.push(r);
   }
   return rows;
+}
+
+/** El complementario es opcional: si no se puede leer o viene vacío, se avisa en consola y se sigue sin él. */
+async function readAdditionalParquet(files) {
+  if (!files.length) return [];
+  try {
+    const rows = await readAllParquet(files, true);
+    if (!rows.length) console.warn('[data_loader] El archivo complementario está vacío: los campos adicionales quedarán en null.');
+    return rows;
+  } catch (e) {
+    console.warn('[data_loader] No se pudo leer el archivo complementario: los campos adicionales quedarán en null.', e);
+    return [];
+  }
+}
+
+/* ---------- Archivos: principal vs. complementario --------------------------- */
+
+const baseName = (key) => String(key).split('/').pop().toLowerCase();
+const isAdditionalKey = (key) => baseName(key) === CFG.ADDITIONAL_PARQUET.toLowerCase();
+
+/**
+ * Separa los archivos de la carpeta. Principal: los llamados MAIN_PARQUET; si no existe ninguno
+ * (p. ej. partes de un UNLOAD de Athena), todos los que no sean el complementario.
+ */
+function splitFiles(files) {
+  const additional = files.filter((f) => isAdditionalKey(f.key));
+  const others = files.filter((f) => !isAdditionalKey(f.key));
+  const named = others.filter((f) => baseName(f.key) === CFG.MAIN_PARQUET.toLowerCase());
+  return { main: named.length ? named : others, additional };
 }
 
 /* ---------- Fuente: S3 (vía DATA_API_URL) ----------------------------------- */
@@ -279,8 +316,9 @@ function parseApiInfo(info) {
 }
 
 /**
- * Descarga el dataset desde S3 y devuelve las filas crudas del Parquet.
- * @returns {Promise<{ rows: object[], meta: object }>}
+ * Descarga el dataset desde S3 (principal + complementario en paralelo) y devuelve las filas crudas.
+ * El complementario es tolerante a fallos: nunca bloquea la carga del principal.
+ * @returns {Promise<{ rows: object[], additionalRows: object[], meta: object }>}
  */
 async function loadDataFromS3() {
   showLoading('Cargando información del sistema...');
@@ -296,20 +334,34 @@ async function loadDataFromS3() {
   const cache = await cachePromise;
 
   let entry = null;
-  if (info && cache && cache.etag === info.etag) {
+  if (info && cache && cache.etag === info.etag && !cache.incomplete) {
     entry = cache;
   } else if (info) {
     try {
       let done = 0;
+      let incomplete = false;
       showLoading('Obteniendo datos...');
-      const files = await Promise.all(
+      if (!info.files.some((f) => isAdditionalKey(f.key))) {
+        console.warn('[data_loader] No se encontró el archivo complementario en la carpeta de datos: los campos adicionales quedarán en null.');
+      }
+      const downloaded = await Promise.all(
         info.files.map(async (f) => {
-          const buffer = await (await fetchOk(f.url, 's3')).arrayBuffer();
-          if (info.files.length > 1) showLoading(`Obteniendo datos (${++done} de ${info.files.length})...`);
-          return { key: f.key, buffer };
+          const additional = isAdditionalKey(f.key);
+          try {
+            const buffer = await (await fetchOk(f.url, 's3', additional ? CFG.ADDITIONAL_TIMEOUT_MS : undefined)).arrayBuffer();
+            if (info.files.length > 1) showLoading(`Obteniendo datos (${++done} de ${info.files.length})...`);
+            return { key: f.key, buffer };
+          } catch (e) {
+            if (!additional) throw e;
+            console.warn('[data_loader] Falló la descarga del archivo complementario: los campos adicionales quedarán en null.', e);
+            incomplete = true;
+            return null;
+          }
         })
       );
-      entry = { etag: info.etag, lastModified: info.lastModified, savedAt: new Date().toISOString(), files };
+      const files = downloaded.filter(Boolean);
+      // `incomplete`: la copia no trae el complementario, así que no debe darse por vigente con este ETag
+      entry = { etag: info.etag, lastModified: info.lastModified, savedAt: new Date().toISOString(), files, incomplete };
       await writeCache(entry);
     } catch (e) {
       failure = e;
@@ -323,9 +375,11 @@ async function loadDataFromS3() {
     entry = cache;
   }
 
-  const rows = await readAllParquet(entry.files);
+  const { main, additional } = splitFiles(entry.files);
+  const [rows, additionalRows] = await Promise.all([readAllParquet(main), readAdditionalParquet(additional)]);
   return {
     rows,
+    additionalRows,
     // `fuente` se muestra en el sidebar: nunca incluye rutas ni nombres de bucket
     meta: { fuente: stale ? 'Copia guardada' : 'Datos en línea', origen: 's3', generado: entry.lastModified, desactualizado: stale },
   };
@@ -333,17 +387,33 @@ async function loadDataFromS3() {
 
 /* ---------- Fuente: Parquet local (solo pruebas) --------------------------- */
 
-async function loadFromLocalParquet(path) {
-  // Solo rutas relativas del mismo sitio (p. ej. data/canales.parquet)
+/** Solo rutas relativas del mismo sitio (p. ej. data/canales.parquet). */
+function localUrl(path, param) {
   const url = new URL(path, location.href);
   if (url.origin !== location.origin) {
-    throw new LoadError('?archivo= solo admite rutas del mismo sitio', { kind: 'data', stage: 'local' });
+    throw new LoadError(`?${param}= solo admite rutas del mismo sitio`, { kind: 'data', stage: 'local' });
   }
+  return url.href;
+}
+
+async function loadFromLocalParquet(path, additionalPath) {
+  const mainUrl = localUrl(path, 'archivo');
+  const additionalUrl = additionalPath ? localUrl(additionalPath, 'complemento') : null;
   showLoading('Obteniendo datos...');
-  const buffer = await (await fetchOk(url.href, 'local')).arrayBuffer();
-  const rows = await readAllParquet([{ key: path, buffer }]);
+  const additionalFiles = additionalUrl
+    ? fetchOk(additionalUrl, 'local', CFG.ADDITIONAL_TIMEOUT_MS)
+        .then((r) => r.arrayBuffer())
+        .then((buffer) => [{ key: additionalPath, buffer }])
+        .catch((e) => {
+          console.warn('[data_loader] Falló la descarga del archivo complementario: los campos adicionales quedarán en null.', e);
+          return [];
+        })
+    : Promise.resolve([]);
+  const [buffer, extraFiles] = await Promise.all([fetchOk(mainUrl, 'local').then((r) => r.arrayBuffer()), additionalFiles]);
+  const [rows, additionalRows] = await Promise.all([readAllParquet([{ key: path, buffer }]), readAdditionalParquet(extraFiles)]);
   return {
     rows,
+    additionalRows,
     meta: { fuente: 'Archivo local de prueba', origen: 'parquet', generado: new Date().toISOString() },
   };
 }
@@ -479,9 +549,6 @@ function sanitizeRecords(rows) {
 
     if (!('grasa_dorsal_mm' in r)) r.grasa_dorsal_mm = null;
     if (!('puntaje_seurop' in r)) r.puntaje_seurop = null;
-    if (!Number.isFinite(r.tiempo_espera_sacrificio_min) || !Number.isFinite(r.tiempo_espera_sacrificio_horas)) {
-      window.DataUtils.aplicarTiempoEsperaSacrificio(r);
-    }
     registros.push(r);
   }
 
@@ -496,10 +563,111 @@ function sanitizeRecords(rows) {
   return { registros, descartados, motivos };
 }
 
+/* ---------- Cruce con el archivo complementario (LEFT JOIN en memoria) ------ */
+
+/** Columnas de cruce del complementario: nunca se anexan al canal (`fecha` y `planta` son del principal). */
+const ADDITIONAL_KEY_COLUMNS = ['fecha', 'turno', 'lote', 'planta'];
+const ADDITIONAL_TIMESTAMPS = ['fecha_ingreso_planta', 'fecha_pesaje_pie', 'fecha_sacrificio', 'fecha_peso_canal_caliente', 'fecha_peso_canal_frio'];
+const ADDITIONAL_FLOATS = ['peso_canal_caliente', 'peso_canal_frio', 'peso_pie', 'peso_pie_prom'];
+const ADDITIONAL_FIELDS = [...ADDITIONAL_TIMESTAMPS, ...ADDITIONAL_FLOATS];
+/** Plantas que cruzan por Fecha + Turno; el resto (Supercerdo Paisa S.A.S, Progresar y las demás) cruza por Lote. */
+const PLANTAS_POR_FECHA_TURNO = new Set(['efege']);
+
+/** Date | epoch | 'YYYY-MM-DD…' → 'YYYY-MM-DD' (UTC) o ''. */
+const normalizeDate = (v) => toDate(typeof v === 'number' || typeof v === 'bigint' ? new Date(Number(v)) : v) || '';
+/** BigInt | número | texto numérico ('01', 1n) → entero como texto ('1') o ''. */
+const normalizeInt = (v) => {
+  const n = toNumber(v);
+  return n === null ? '' : String(Math.trunc(n));
+};
+const normalizeText = (v) => (v == null ? '' : String(v).trim().toLowerCase());
+
+/** Minúsculas en las columnas y tipos limpios en los atributos del complementario. */
+function parseAdditionalRow(raw) {
+  const key = {};
+  const extra = {};
+  for (const [col, value] of Object.entries(raw)) {
+    const c = col.trim().toLowerCase();
+    const v = typeof value === 'bigint' ? Number(value) : value;
+    if (ADDITIONAL_KEY_COLUMNS.includes(c)) key[c] = v;
+    else if (ADDITIONAL_TIMESTAMPS.includes(c)) extra[c] = toTimestamp(v);
+    else if (ADDITIONAL_FLOATS.includes(c)) extra[c] = toNumber(v);
+    else extra[c] = v instanceof Date ? toTimestamp(v) : v;
+  }
+  return { key, extra };
+}
+
+/** Índices de búsqueda O(1). Con llaves repetidas gana el primer registro (se cuentan en `duplicados`). */
+function buildAdditionalIndex(additionalRows) {
+  const byFechaTurno = new Map();
+  const byLote = new Map();
+  const stats = { duplicados: 0, conPlanta: false };
+  const put = (map, k, extra) => {
+    if (map.has(k)) stats.duplicados++;
+    else map.set(k, extra);
+  };
+  for (const raw of additionalRows) {
+    if (!raw || typeof raw !== 'object') continue;
+    const { key, extra } = parseAdditionalRow(raw);
+    if (key.planta != null) stats.conPlanta = true;
+    const fecha = normalizeDate(key.fecha);
+    const turno = normalizeInt(key.turno);
+    if (fecha && turno) put(byFechaTurno, `${fecha}|${turno}`, extra);
+    const lote = normalizeText(key.lote);
+    if (lote) put(byLote, lote, extra);
+  }
+  return { byFechaTurno, byLote, stats };
+}
+
+/** Efege: Fecha + Turno. Cualquier otra planta: Lote (si el canal no tiene lote, no hay cruce). */
+function findAdditional(r, { byFechaTurno, byLote }) {
+  if (PLANTAS_POR_FECHA_TURNO.has(normalizeText(r.planta))) {
+    const fecha = normalizeDate(r.fecha);
+    const turno = normalizeInt(r.turno);
+    return fecha && turno ? byFechaTurno.get(`${fecha}|${turno}`) : undefined;
+  }
+  const lote = normalizeText(r.lote);
+  return lote ? byLote.get(lote) : undefined;
+}
+
+const pct = (parte, total) => `${total ? ((parte / total) * 100).toFixed(1) : '0.0'}%`;
+
+/**
+ * Anexa los campos del complementario a cada canal. No pisa lo que ya trae el principal: un campo
+ * solo se completa si el canal lo tiene vacío. Sin cruce, los campos declarados quedan en null.
+ */
+function joinAdditional(registros, additionalRows) {
+  const index = buildAdditionalIndex(additionalRows);
+  let cruzados = 0;
+  const plantas = new Map();
+  for (const r of registros) {
+    const match = findAdditional(r, index);
+    const p = plantas.get(r.planta) || plantas.set(r.planta, { total: 0, cruzados: 0 }).get(r.planta);
+    p.total++;
+    if (match) {
+      cruzados++;
+      p.cruzados++;
+    }
+    for (const f of ADDITIONAL_FIELDS) if (r[f] == null) r[f] = match && match[f] != null ? match[f] : null;
+    if (match) for (const [c, v] of Object.entries(match)) if (!(c in r)) r[c] = v;
+  }
+  console.info('[data_loader] Cruce con el complementario:', {
+    registros_principal: registros.length,
+    registros_complementario: additionalRows.length,
+    llaves_fecha_turno: index.byFechaTurno.size,
+    llaves_lote: index.byLote.size,
+    llaves_duplicadas: index.stats.duplicados,
+    complementario_con_planta: index.stats.conPlanta,
+    cruzados,
+    cruzados_pct: pct(cruzados, registros.length),
+    por_planta: Object.fromEntries([...plantas].map(([planta, p]) => [planta, `${p.cruzados}/${p.total} (${pct(p.cruzados, p.total)})`])),
+  });
+}
+
 const uniques = (registros, field) =>
   [...new Set(registros.map((r) => r[field]).filter((v) => v != null && v !== ''))].sort((a, b) => String(a).localeCompare(String(b), 'es'));
 
-function buildDataset(rows, metaExtra) {
+function buildDataset(rows, metaExtra, additionalRows = []) {
   if (!Array.isArray(rows)) {
     throw new LoadError('El archivo no contiene una lista de registros', { kind: 'data', stage: 'data' });
   }
@@ -511,6 +679,14 @@ function buildDataset(rows, metaExtra) {
   const { registros, descartados, motivos } = sanitizeRecords(rows);
   if (!registros.length) {
     throw new LoadError(`Ninguno de los ${rows.length} registros es válido (${JSON.stringify(motivos)})`, { kind: 'data', stage: 'data' });
+  }
+
+  joinAdditional(registros, additionalRows);
+  // Tras el cruce: las fechas del complementario pueden completar ingreso/sacrificio
+  for (const r of registros) {
+    if (!Number.isFinite(r.tiempo_espera_sacrificio_min) || !Number.isFinite(r.tiempo_espera_sacrificio_horas)) {
+      window.DataUtils.aplicarTiempoEsperaSacrificio(r);
+    }
   }
 
   const granjas = new Map();
@@ -631,11 +807,12 @@ let appLoaded = false;
 async function boot() {
   ui.retry.disabled = true;
   try {
-    const localFile = new URLSearchParams(location.search).get('archivo');
-    const { rows, meta } = localFile ? await loadFromLocalParquet(localFile) : await loadDataFromS3();
+    const params = new URLSearchParams(location.search);
+    const localFile = params.get('archivo');
+    const { rows, additionalRows, meta } = localFile ? await loadFromLocalParquet(localFile, params.get('complemento')) : await loadDataFromS3();
 
     showLoading('Procesando datos...');
-    const dataset = buildDataset(rows, meta);
+    const dataset = buildDataset(rows, meta, additionalRows);
     window.DASHBOARD_DATA = dataset;
 
     if (!appLoaded) {

@@ -17,18 +17,62 @@ Contexto técnico del proyecto: qué hace, de dónde salen los datos, cómo se c
 
 - **Acceso:** lista blanca de correos (`auth_config.js`), ver [§6](#6-autenticación-por-lista-blanca).
 
+### Doble Parquet (principal + complementario)
+
+La misma carpeta de S3 (`S3_DATA_URL`) contiene dos archivos, definidos en `config.js`:
+
+| Archivo | Config | Contenido | Obligatorio |
+|---|---|---|---|
+| `alura_carcasses_cipa_in_house.parquet` | `MAIN_PARQUET` | Detalle canal por canal. | Sí: si falla, el tablero muestra el error. |
+| `additional_data_cipa.parquet` | `ADDITIONAL_PARQUET` | Consolidado (fechas y pesos de proceso) que se anexa a cada canal. | No: ver tolerancia a fallos. |
+
+La Function firma todos los archivos de datos de la carpeta sin distinguirlos; `data_loader.js` los separa por nombre (`splitFiles()`). Si ningún archivo se llama como `MAIN_PARQUET` (p. ej. partes de un UNLOAD de Athena), el principal son todos los que no sean el complementario.
+
+Se descargan en paralelo (`Promise.all`) y se leen en paralelo con `parquetReadObjects` (hyparquet 1.31.5). **Tolerancia a fallos del complementario:** si no está en la carpeta, tarda más de `ADDITIONAL_TIMEOUT_MS` (15 s), falla la descarga o la lectura, o viene vacío, se registra un `console.warn` y los canales quedan con los campos adicionales en `null`; el principal nunca se bloquea. En ese caso la copia de IndexedDB se marca `incomplete` y no se da por vigente con ese ETag, de modo que la siguiente carga reintenta el complementario.
+
 ### Flujo de datos
 
 ```
-Aurora PostgreSQL ──export──▶ S3 (Parquet, bucket privado)
+Aurora PostgreSQL ──export──▶ S3 (carpeta con 2 Parquet, bucket privado)
                                    ▲            │
                        ListBucket/ │            │ GET con URL firmada (CORS)
                        HeadObject  │            ▼
  Navegador ──GET /api/canales──▶ Vercel Function ──▶ { etag, files:[{ key, url }] }
      │                                                     │
-     └──────────── descarga cada url ◀─────────────────────┘
-           hyparquet → sanitizeRecords() → window.DASHBOARD_DATA → app.js
+     └──────────── descarga cada url (en paralelo) ◀───────┘
+           hyparquet → sanitizeRecords(principal) ──┐
+           hyparquet → índices Map (complementario) ┴▶ joinAdditional() (LEFT JOIN)
+                    → tiempo de espera → window.DASHBOARD_DATA → app.js
 ```
+
+### Cruce condicional por planta (LEFT JOIN en memoria)
+
+`joinAdditional()` (en `data_loader.js`) indexa el complementario en dos `Map` antes de recorrer los canales (búsqueda O(1), sin bucles anidados):
+
+- `mapByFechaTurno`: llave `YYYY-MM-DD|turno`. Ignora filas con fecha o turno vacíos.
+- `mapByLote`: llave `lote` en minúsculas y sin espacios. Ignora filas con lote vacío.
+
+La planta del canal se compara con `trim().toLowerCase()`:
+
+| Planta del canal | Índice | Llave tomada del canal |
+|---|---|---|
+| `Efege` | `mapByFechaTurno` | `fecha` + `turno` |
+| `Supercerdo Paisa S.A.S`, `Progresar` | `mapByLote` | `lote` |
+| Cualquier otra (fallback) | `mapByLote` | `lote`; sin lote no hay cruce |
+
+(Las dos últimas filas se comportan igual; solo `efege` está en el código como excepción, `PLANTAS_POR_FECHA_TURNO`.)
+
+Normalización de llaves (hyparquet devuelve `Date`/string y `Number`/`BigInt`): `normalizeDate` → `YYYY-MM-DD` en UTC o `""`; `normalizeInt` → entero como texto (`"01"` y `1n` → `"1"`) o `""`; `normalizeText` → `trim().toLowerCase()` o `""`. Las columnas del complementario se buscan sin distinguir mayúsculas (`Fecha`/`fecha`, `Turno`/`turno`, `Lote`/`lote`, `Planta`/`planta`); en el principal se leen `planta`, `fecha`, `turno` y `lote`.
+
+Reglas del merge:
+
+- Las llaves repetidas en el complementario se resuelven con el **primer** registro; la consola informa cuántas hubo.
+- Las columnas de cruce del complementario (`fecha`, `turno`, `lote`, `planta`) **no** se anexan: nunca pisan las del principal.
+- **No se sobrescribe nada del principal.** Un campo adicional solo se completa si el canal lo trae vacío (`null`/ausente). Por eso `fecha_ingreso_planta`, `fecha_pesaje_pie` y `fecha_sacrificio`, que el principal ya puede traer, conservan su valor.
+- Sin coincidencia (o con llaves vacías), cada campo adicional queda en `null` explícito.
+- Cualquier otra columna del complementario también se anexa, salvo que ya exista en el canal.
+- Tras el cruce se calcula `tiempo_espera_sacrificio_*` para los canales que aún no lo tengan y cuyas dos fechas existan.
+- Al terminar se imprime **un solo** `console.info` con: registros del principal y del complementario, llaves indexadas y duplicadas, si el complementario trae columna `planta` (las llaves se indexan de forma global, sin planta) y cruzados con su porcentaje, global y `por_planta` (`cruzados/total (%)`).
 
 El navegador **no** puede leer una ruta `s3://` ni debe tener credenciales de AWS. La Function firma URLs de corta duración (5 min por defecto) y el navegador descarga el Parquet directamente desde S3. El resultado se guarda en IndexedDB y solo se vuelve a descargar cuando cambia el `ETag`; si S3 no responde, se muestra la última copia guardada con un aviso.
 
@@ -55,12 +99,12 @@ Los mensajes avanzan por etapas: "Cargando información del sistema..." → "Obt
 | Archivo | Rol |
 |---|---|
 | `index.html` | Estructura de la SPA, tokens `@theme` (Tailwind v4) y componentes CSS, pantalla de ingreso, estados de carga/error y orden de los `<script>`. |
-| `config.js` | `window.APP_CONFIG`: ubicación S3 (`S3_DATA_URL`), endpoint de la API (`DATA_API_URL`), tiempo límite, zona horaria, país por defecto y `COLUMN_MAP`. |
+| `config.js` | `window.APP_CONFIG`: ubicación S3 (`S3_DATA_URL`), nombres de los Parquet (`MAIN_PARQUET`, `ADDITIONAL_PARQUET`), endpoint de la API (`DATA_API_URL`), tiempos límite (`REQUEST_TIMEOUT_MS`, `ADDITIONAL_TIMEOUT_MS`), zona horaria, país por defecto y `COLUMN_MAP`. |
 | `auth_config.js` | `window.ALLOWED_EMAILS`: correos con acceso. |
 | `auth.js` | Gatekeeper: muestra el login o la app, guarda la sesión (`auth_user`), pinta el correo en el sidebar y gestiona "Cerrar sesión". Expone `window.Auth`. |
 | `data_utils.js` | `window.DataUtils`: cálculo del tiempo de espera ingreso → sacrificio (`calcularTiempoEsperaSacrificio`, `aplicarTiempoEsperaSacrificio`). |
 | `seurop_quartiles.js` | Cuartiles Q25/Q75 por país y año para el IQ-Col (generado; no editar a mano). |
-| `data_loader.js` | Módulo ES: espera la sesión, `loadDataFromS3()`, caché IndexedDB, validación/saneamiento, estados de carga y error, y carga de `app.js`. |
+| `data_loader.js` | Módulo ES: espera la sesión, `loadDataFromS3()` (principal + complementario), caché IndexedDB, validación/saneamiento, cruce `joinAdditional()`, estados de carga y error, y carga de `app.js`. |
 | `app.js` | Lógica de la SPA: tokens JS, dominio (SEUROP, IQ-Col), agregación, ECharts, filtros globales, vistas y router. |
 | `api/canales.js` | Vercel Function (Node.js): resuelve el archivo o prefijo en S3 y devuelve URLs firmadas. |
 | `package.json` | Dependencias de la Function (`@aws-sdk/*`, OIDC de Vercel). El front no necesita instalación. |
@@ -162,7 +206,22 @@ Cada fila del Parquet (una canal) se convierte en un objeto. Los nombres de colu
 | `color`, `variacion_color` | entero | `null` |
 | `peso_canal_caliente_kg`, `peso_canal_fria_kg` | número | `null` |
 | `fecha_ingreso_planta`, `fecha_pesaje_pie`, `fecha_sacrificio`, `fecha_canal_caliente`, `fecha_canal_fria` | `TIMESTAMP` → `'YYYY-MM-DD HH:mm:ss'` | `null`. La zona de conversión es `APP_CONFIG.TIMEZONE`. |
-| `tiempo_espera_sacrificio_min` / `_horas` | entero / número | Si no vienen, se calculan como `fecha_sacrificio − fecha_ingreso_planta`; `null` si falta alguna fecha. |
+| `tiempo_espera_sacrificio_min` / `_horas` | entero / número | Si no vienen, se calculan tras el cruce con el complementario como `fecha_sacrificio − fecha_ingreso_planta`; `null` si falta alguna fecha. |
+| `turno`, `lote` | entero / texto | Solo se usan como llaves del cruce (§1); no se transforman en el registro. |
+
+### Columnas del complementario (`additional_data_cipa.parquet`)
+
+Se anexan a cada canal con **el nombre que traen en el Parquet** (no se renombran al esquema anterior: `peso_canal_frio` ≠ `peso_canal_fria_kg`, `fecha_peso_canal_caliente` ≠ `fecha_canal_caliente`). Llaves de cruce del complementario: `Fecha` (solo fecha), `Turno` (INT) y `Lote` (TEXT); no se anexan.
+
+| Campo | Tipo | Sin coincidencia / valor inválido |
+|---|---|---|
+| `fecha_ingreso_planta`, `fecha_pesaje_pie`, `fecha_sacrificio` | `TIMESTAMP` → `'YYYY-MM-DD HH:mm:ss'` | `null`. Si el principal ya trae el valor, se conserva el del principal. |
+| `fecha_peso_canal_caliente`, `fecha_peso_canal_frio` | `TIMESTAMP` → `'YYYY-MM-DD HH:mm:ss'` | `null` |
+| `peso_canal_caliente`, `peso_canal_frio`, `peso_pie` | número | `null` |
+| `peso_pie_prom` | número (FLOAT) | `null` |
+| _(planta)_ | El complementario **no** trae columna de planta: las llaves se indexan de forma global. | — |
+
+Ninguno es obligatorio y ninguna vista los usa todavía; solo `fecha_ingreso_planta` y `fecha_sacrificio` alimentan `tiempo_espera_sacrificio_*`, que se calcula **después** del cruce (ver §1).
 
 ### Reglas de saneamiento (`data_loader.js → sanitizeRecords`)
 
@@ -233,7 +292,7 @@ Peso, % magro, grasa dorsal e IQ-Col promedio son medias aritméticas sobre los 
 | `URL_EXPIRA_SEGUNDOS` | Opcional, por defecto `300`. |
 | `CORS_ALLOWED_ORIGINS` | Opcional: orígenes extra que pueden llamar a `/api/canales` (separados por coma). `http://localhost:*` y `http://127.0.0.1:*` siempre se permiten. |
 
-Si `S3_DATA_URL` es un prefijo (carpeta), la Function lista los archivos de datos (ignora `_SUCCESS`, `.metadata`, `.csv`, etc.) y el navegador concatena todos. Un UNLOAD de Athena exige un prefijo vacío, así que la carpeta contiene una sola versión del dataset.
+Si `S3_DATA_URL` es un prefijo (carpeta), la Function lista los archivos de datos (ignora `_SUCCESS`, `.metadata`, `.csv`, etc.) y el navegador separa el complementario (`additional_data_cipa.parquet`) y concatena el resto como principal. **El complementario debe vivir en esa misma carpeta**; si lo subes a otra, mueve ambos o cambia `S3_DATA_URL` (config.js y Vercel) y la política IAM (§5.2). Un UNLOAD de Athena exige un prefijo vacío, así que la carpeta contiene una sola versión del dataset.
 
 ### 5.2 Política IAM mínima del rol de la Function
 
@@ -297,6 +356,8 @@ aws s3api put-bucket-cors --bucket aws-athena-query-results-234988943857-us-east
 | "No se encontró el servicio de datos (404)" | Live Server no ejecuta `/api`: ajusta `DATA_API_URL` (ver §7). |
 | "No se encontraron los datos (404)" | La ubicación de `S3_DATA_URL` no tiene archivos de datos; el log de Vercel indica la ruta consultada. |
 | "Faltan columnas obligatorias" | El export cambió de nombres: usa `COLUMN_MAP`. |
+| Consola: "…complementario… quedarán en null" (`console.warn`) | El complementario no está en la carpeta, falló/tardó la descarga, no se pudo leer o está vacío. El tablero carga igual. |
+| Consola: `cruzados_pct` bajo | Llaves que no coinciden: revisa formato de `lote`, `fecha`/`turno` y el nombre de la planta; `llaves_duplicadas` > 0 indica llaves repetidas en el complementario. |
 
 ---
 
@@ -331,7 +392,7 @@ Es un **control de interfaz, no de seguridad**: no hay verificación del correo 
 4. Clic derecho en `index.html` → **Open with Live Server** (`http://127.0.0.1:5500`).
 5. Ingresa con un correo de `auth_config.js`.
 
-**Sin acceso a S3:** copia un snapshot a `data/` (ignorado por git) y abre `http://127.0.0.1:5500/index.html?archivo=data/canales.parquet`. Pasa por la misma validación que los datos de S3.
+**Sin acceso a S3:** copia un snapshot a `data/` (ignorado por git) y abre `http://127.0.0.1:5500/index.html?archivo=data/canales.parquet`. Pasa por la misma validación que los datos de S3. Para probar también el cruce, añade el complementario: `…/index.html?archivo=data/canales.parquet&complemento=data/additional_data_cipa.parquet`.
 
 ### Opción B — Vercel CLI (front + API)
 

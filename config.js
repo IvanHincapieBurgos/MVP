@@ -13,8 +13,20 @@
  * S3_DATA_URL en Vercel: si cambias la ubicación, actualiza ambas.
  * ========================================================================== */
 window.APP_CONFIG = Object.freeze({
-  /** Ubicación del Parquet: un archivo .parquet o un prefijo (carpeta) con uno o varios archivos. */
+  /**
+   * Ubicación base de los Parquet: un prefijo (carpeta) en S3 que contiene tanto el archivo
+   * principal como el complementario. La Function firma todos los archivos de datos de la carpeta.
+   */
   S3_DATA_URL: 's3://aws-athena-query-results-234988943857-us-east-1/alura_carcasses_cipa_in_house/Parquet',
+
+  /** Archivo principal (detalle canal por canal). Si no está en la carpeta, se usan todos los archivos que no sean el complementario. */
+  MAIN_PARQUET: 'alura_carcasses_cipa_in_house.parquet',
+
+  /** Archivo complementario (consolidado), cruzado en memoria con el principal (LEFT JOIN). Opcional: si falla, el tablero carga sin él. */
+  ADDITIONAL_PARQUET: 'additional_data_cipa.parquet',
+
+  /** Tiempo máximo de descarga del archivo complementario (no debe retrasar la carga del principal). */
+  ADDITIONAL_TIMEOUT_MS: 15000,
 
   /**
    * Endpoint que entrega las URLs firmadas.

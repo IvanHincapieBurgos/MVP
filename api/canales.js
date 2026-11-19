@@ -19,6 +19,10 @@
  *   - un prefijo:  s3://bucket/ruta/Parquet   (carpeta de un UNLOAD/CTAS de
  *                  Athena con uno o varios archivos; se devuelven todos)
  *
+ * La carpeta contiene el Parquet principal y el complementario
+ * (additional_data_cipa.parquet): la Function los firma sin distinguirlos y es
+ * el navegador (data_loader.js) quien los separa por nombre.
+ *
  * Variables de entorno (Vercel → Settings → Environment Variables):
  *   S3_DATA_URL            s3://bucket/ruta (recomendada; igual a config.js)
  *   S3_BUCKET + S3_KEY     Alternativa a S3_DATA_URL (S3_KEY puede ser archivo o prefijo)
