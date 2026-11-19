@@ -342,7 +342,9 @@ async function loadDataFromS3() {
       let incomplete = false;
       showLoading('Obteniendo datos...');
       if (!info.files.some((f) => isAdditionalKey(f.key))) {
-        console.warn('[data_loader] No se encontró el archivo complementario en la carpeta de datos: los campos adicionales quedarán en null.');
+        console.warn(
+          `[data_loader] No se encontró "${CFG.ADDITIONAL_PARQUET}" en la carpeta de datos: los campos adicionales quedarán en null. Archivos recibidos: ${info.files.map((f) => baseName(f.key)).join(', ')}`
+        );
       }
       const downloaded = await Promise.all(
         info.files.map(async (f) => {
@@ -619,14 +621,23 @@ function buildAdditionalIndex(additionalRows) {
   return { byFechaTurno, byLote, stats };
 }
 
+/**
+ * El principal no trae columnas `lote` ni `turno`: ambos salen de `id_lote` (si algún día llegan, tienen prioridad).
+ *  - Lote: `id_lote` tal cual (Supercerdo Paisa, Progresar y demás).
+ *  - Turno (Efege): `id_lote` es DDMMAA + "02" + turno de 3 dígitos (p. ej. 16112602167 → turno 167);
+ *    en registros antiguos es solo el turno ("167"). En ambos casos son los últimos 3 caracteres.
+ */
+const loteDe = (r) => r.lote ?? r.id_lote;
+const turnoDe = (r) => r.turno ?? String(r.id_lote ?? '').slice(-3);
+
 /** Efege: Fecha + Turno. Cualquier otra planta: Lote (si el canal no tiene lote, no hay cruce). */
 function findAdditional(r, { byFechaTurno, byLote }) {
   if (PLANTAS_POR_FECHA_TURNO.has(normalizeText(r.planta))) {
     const fecha = normalizeDate(r.fecha);
-    const turno = normalizeInt(r.turno);
+    const turno = normalizeInt(turnoDe(r));
     return fecha && turno ? byFechaTurno.get(`${fecha}|${turno}`) : undefined;
   }
-  const lote = normalizeText(r.lote);
+  const lote = normalizeText(loteDe(r));
   return lote ? byLote.get(lote) : undefined;
 }
 
@@ -638,8 +649,10 @@ const pct = (parte, total) => `${total ? ((parte / total) * 100).toFixed(1) : '0
  */
 function joinAdditional(registros, additionalRows) {
   const index = buildAdditionalIndex(additionalRows);
+  const columnasPrincipal = registros.length ? Object.keys(registros[0]) : []; // antes de anexar columnas
   let cruzados = 0;
   const plantas = new Map();
+  const sinCruce = [];
   for (const r of registros) {
     const match = findAdditional(r, index);
     const p = plantas.get(r.planta) || plantas.set(r.planta, { total: 0, cruzados: 0 }).get(r.planta);
@@ -647,6 +660,8 @@ function joinAdditional(registros, additionalRows) {
     if (match) {
       cruzados++;
       p.cruzados++;
+    } else if (sinCruce.length < 3) {
+      sinCruce.push({ planta: r.planta, fecha: normalizeDate(r.fecha), turno: normalizeInt(turnoDe(r)), lote: normalizeText(loteDe(r)) });
     }
     for (const f of ADDITIONAL_FIELDS) if (r[f] == null) r[f] = match && match[f] != null ? match[f] : null;
     if (match) for (const [c, v] of Object.entries(match)) if (!(c in r)) r[c] = v;
@@ -661,6 +676,11 @@ function joinAdditional(registros, additionalRows) {
     cruzados,
     cruzados_pct: pct(cruzados, registros.length),
     por_planta: Object.fromEntries([...plantas].map(([planta, p]) => [planta, `${p.cruzados}/${p.total} (${pct(p.cruzados, p.total)})`])),
+    // Diagnóstico de llaves: columnas que llegaron y ejemplos de cada lado
+    columnas_principal: columnasPrincipal,
+    columnas_complementario: additionalRows.length ? Object.keys(additionalRows[0]) : [],
+    ejemplo_llaves_complementario: { fecha_turno: [...index.byFechaTurno.keys()].slice(0, 3), lote: [...index.byLote.keys()].slice(0, 3) },
+    ejemplo_canales_sin_cruce: sinCruce,
   });
 }
 

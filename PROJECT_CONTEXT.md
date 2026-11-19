@@ -56,13 +56,17 @@ La planta del canal se compara con `trim().toLowerCase()`:
 
 | Planta del canal | Índice | Llave tomada del canal |
 |---|---|---|
-| `Efege` | `mapByFechaTurno` | `fecha` + `turno` |
-| `Supercerdo Paisa S.A.S`, `Progresar` | `mapByLote` | `lote` |
-| Cualquier otra (fallback) | `mapByLote` | `lote`; sin lote no hay cruce |
+| `Efege` | `mapByFechaTurno` | `fecha` + turno (**últimos 3 dígitos de `id_lote`**) |
+| `Supercerdo Paisa S.A.S`, `Progresar` | `mapByLote` | lote (**`id_lote`**) |
+| Cualquier otra (fallback) | `mapByLote` | lote (`id_lote`); sin lote no hay cruce |
+
+**El principal no trae columnas `lote` ni `turno`**: ambos salen de `id_lote` (`loteDe()` y `turnoDe()` en `data_loader.js`; si algún día llegan columnas `lote`/`turno`, tienen prioridad). En Efege, `id_lote` es `DDMMAA` + `02` + turno de 3 dígitos (`16112602167` → 16/11/2026, turno 167; en registros antiguos es solo el turno, `"167"`), así que el turno son siempre los últimos 3 caracteres. Las demás plantas usan `id_lote` tal cual (`"55237"`).
+
+Cobertura verificada con los Parquet de producción (19/11/2026): Progresar 88,0 %, Supercerdo Paisa 62,1 %, Efege 29,8 % global (88,8 % de los canales desde 2026-01-04, que es donde empieza el complementario). Las plantas que no están en el complementario (Ble, Cavasa, Frigoporcinos Bello, etc.) cruzan 0 %, y es lo esperado: sus campos adicionales quedan en `null`.
 
 (Las dos últimas filas se comportan igual; solo `efege` está en el código como excepción, `PLANTAS_POR_FECHA_TURNO`.)
 
-Normalización de llaves (hyparquet devuelve `Date`/string y `Number`/`BigInt`): `normalizeDate` → `YYYY-MM-DD` en UTC o `""`; `normalizeInt` → entero como texto (`"01"` y `1n` → `"1"`) o `""`; `normalizeText` → `trim().toLowerCase()` o `""`. Las columnas del complementario se buscan sin distinguir mayúsculas (`Fecha`/`fecha`, `Turno`/`turno`, `Lote`/`lote`, `Planta`/`planta`); en el principal se leen `planta`, `fecha`, `turno` y `lote`.
+Normalización de llaves (hyparquet devuelve `Date`/string y `Number`/`BigInt`): `normalizeDate` → `YYYY-MM-DD` en UTC o `""`; `normalizeInt` → entero como texto (`"01"` y `1n` → `"1"`) o `""`; `normalizeText` → `trim().toLowerCase()` o `""`. Las columnas del complementario se buscan sin distinguir mayúsculas (`Fecha`/`fecha`, `Turno`/`turno`, `Lote`/`lote`, `Planta`/`planta`); en el principal se leen `planta`, `fecha` e `id_lote`.
 
 Reglas del merge:
 
@@ -72,7 +76,7 @@ Reglas del merge:
 - Sin coincidencia (o con llaves vacías), cada campo adicional queda en `null` explícito.
 - Cualquier otra columna del complementario también se anexa, salvo que ya exista en el canal.
 - Tras el cruce se calcula `tiempo_espera_sacrificio_*` para los canales que aún no lo tengan y cuyas dos fechas existan.
-- Al terminar se imprime **un solo** `console.info` con: registros del principal y del complementario, llaves indexadas y duplicadas, si el complementario trae columna `planta` (las llaves se indexan de forma global, sin planta) y cruzados con su porcentaje, global y `por_planta` (`cruzados/total (%)`).
+- Al terminar se imprime **un solo** `console.info` con: registros del principal y del complementario, llaves indexadas y duplicadas, si el complementario trae columna `planta` (las llaves se indexan de forma global, sin planta) y cruzados con su porcentaje, global y `por_planta` (`cruzados/total (%)`), más un diagnóstico de llaves: `columnas_principal`, `columnas_complementario`, `ejemplo_llaves_complementario` y `ejemplo_canales_sin_cruce` (llaves ya normalizadas, para compararlas a simple vista).
 
 El navegador **no** puede leer una ruta `s3://` ni debe tener credenciales de AWS. La Function firma URLs de corta duración (5 min por defecto) y el navegador descarga el Parquet directamente desde S3. El resultado se guarda en IndexedDB y solo se vuelve a descargar cuando cambia el `ETag`; si S3 no responde, se muestra la última copia guardada con un aviso.
 
@@ -207,7 +211,7 @@ Cada fila del Parquet (una canal) se convierte en un objeto. Los nombres de colu
 | `peso_canal_caliente_kg`, `peso_canal_fria_kg` | número | `null` |
 | `fecha_ingreso_planta`, `fecha_pesaje_pie`, `fecha_sacrificio`, `fecha_canal_caliente`, `fecha_canal_fria` | `TIMESTAMP` → `'YYYY-MM-DD HH:mm:ss'` | `null`. La zona de conversión es `APP_CONFIG.TIMEZONE`. |
 | `tiempo_espera_sacrificio_min` / `_horas` | entero / número | Si no vienen, se calculan tras el cruce con el complementario como `fecha_sacrificio − fecha_ingreso_planta`; `null` si falta alguna fecha. |
-| `turno`, `lote` | entero / texto | Solo se usan como llaves del cruce (§1); no se transforman en el registro. |
+| `id_lote` | texto | Lote del canal; también codifica el turno en Efege. Solo se usa como llave del cruce (§1); no se transforma. |
 
 ### Columnas del complementario (`additional_data_cipa.parquet`)
 
@@ -220,6 +224,8 @@ Se anexan a cada canal con **el nombre que traen en el Parquet** (no se renombra
 | `peso_canal_caliente`, `peso_canal_frio`, `peso_pie` | número | `null` |
 | `peso_pie_prom` | número (FLOAT) | `null` |
 | _(planta)_ | El complementario **no** trae columna de planta: las llaves se indexan de forma global. | — |
+
+**Ojo: son totales por lote (o por turno en Efege), no por canal.** Cada canal recibe el mismo valor de su lote (p. ej. `peso_canal_caliente = 6614,3` kg en los miles de canales de un lote de Progresar); sumarlos por canal multiplicaría el peso. Úsalos como atributo del lote o toma un valor por lote antes de agregar.
 
 Ninguno es obligatorio y ninguna vista los usa todavía; solo `fecha_ingreso_planta` y `fecha_sacrificio` alimentan `tiempo_espera_sacrificio_*`, que se calcula **después** del cruce (ver §1).
 
@@ -357,7 +363,7 @@ aws s3api put-bucket-cors --bucket aws-athena-query-results-234988943857-us-east
 | "No se encontraron los datos (404)" | La ubicación de `S3_DATA_URL` no tiene archivos de datos; el log de Vercel indica la ruta consultada. |
 | "Faltan columnas obligatorias" | El export cambió de nombres: usa `COLUMN_MAP`. |
 | Consola: "…complementario… quedarán en null" (`console.warn`) | El complementario no está en la carpeta, falló/tardó la descarga, no se pudo leer o está vacío. El tablero carga igual. |
-| Consola: `cruzados_pct` bajo | Llaves que no coinciden: revisa formato de `lote`, `fecha`/`turno` y el nombre de la planta; `llaves_duplicadas` > 0 indica llaves repetidas en el complementario. |
+| Consola: `cruzados_pct` bajo | Llaves que no coinciden: revisa `id_lote`, `fecha` y el nombre de la planta; las plantas que no están en el complementario siempre dan 0 %. `llaves_duplicadas` > 0 indica llaves repetidas en el complementario (hoy son filas idénticas; se usa la primera). |
 
 ---
 
