@@ -454,13 +454,30 @@ App.data = (function () {
     };
   }
 
+  /**
+   * Agregación genérica por una dimensión: una entrada por valor de `keyOf(r)` con las mismas
+   * métricas de `aggregate` (conteo, promedios, CV, IQ-Col y clase SEUROP predominante).
+   * Los registros con clave null/undefined no se agrupan.
+   */
+  function aggregateBy(rows, keyOf) {
+    const groups = new Map();
+    for (const r of rows) {
+      const k = keyOf(r);
+      if (k == null) continue;
+      let a = groups.get(k);
+      if (!a) groups.set(k, (a = createAcc(k)));
+      accumulate(a, r);
+    }
+    return [...groups.values()].map(finalize);
+  }
+
   function seuropCounts(rows) {
     const c = [0, 0, 0, 0, 0, 0];
     for (const r of rows) c[r._seu]++;
     return c;
   }
 
-  return { plantas, granjas, granjasDePlantas, comercializadores, comercializadoresDePlantas, minDate, maxDate, meta: source.meta, filter, aggregate, seuropCounts };
+  return { plantas, granjas, granjasDePlantas, comercializadores, comercializadoresDePlantas, minDate, maxDate, meta: source.meta, filter, aggregate, aggregateBy, seuropCounts };
 })();
 
 /* ==========================================================================
@@ -1065,6 +1082,88 @@ App.components.DataTable = class DataTable {
 };
 
 /* --------------------------------------------------------------------------
+ * 5.3b RankingCols — columnas reutilizables de las tablas de ranking (Inicio:
+ *      "Ranking por granja"; Scores: ranking dinámico). Cada vista las combina
+ *      en su propio orden. Esperan filas con las métricas de `App.data.aggregateBy`
+ *      (count, pesoProm, cvPeso, magroProm, grasaProm, iqProm, seuTop) y `share`
+ *      (count / máximo del grupo) para la barra de la columna de canales.
+ *      Las dos primeras (# y la de agrupación) quedan fijas a la izquierda (móvil):
+ *      fondo explícito según la fila (impar bg-white, par bg-surface, como
+ *      .data-table--striped), así que la tabla debe usar `striped: true`.
+ * ------------------------------------------------------------------------ */
+App.components.RankingCols = (function () {
+  'use strict';
+  const U = App.utils;
+
+  const POS_W = 'w-[3.25rem] min-w-[3.25rem] max-w-[3.25rem]';
+  const stickyBg = (i) => `${i % 2 ? 'bg-surface' : 'bg-white'} group-hover:bg-row-hover`;
+
+  const IQ_TIP = 'Modelo propio de Alura. Calidad del canal según peso y % de magro frente al rango del país.';
+  const INFO_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>';
+
+  /** Recuadro con la letra SEUROP y su color exacto de la paleta. */
+  function seuropLetterBox(i) {
+    const s = U.SEUROP[i];
+    return `<span class="num inline-flex h-7 w-7 items-center justify-center rounded-[7px] font-display text-[0.75rem] font-bold text-white"
+      style="background-color:${s.color}" title="${s.letter} · ${s.key}" aria-label="Categoría ${s.letter} (${s.key})">${s.letter}</span>`;
+  }
+
+  return {
+    IQ_TIP,
+    seuropLetterBox,
+    /** Posición según el orden activo; continúa entre páginas (11–20 en la página 2…). */
+    pos: () => ({
+      key: 'pos',
+      label: '#',
+      align: 'right',
+      sortable: false,
+      headClass: `sticky left-0 z-20 bg-surface ${POS_W}`,
+      cellClass: (r, i) => `sticky left-0 z-10 ${POS_W} ${stickyBg(i)}`,
+      render: (r, pos) => `<span class="num font-semibold text-grey-mid">${U.fmt(pos)}</span>`,
+    }),
+    /** Columna de agrupación fija: `text(r)` es lo que se muestra; `sortValue(r)` lo que ordena (por defecto, el texto). */
+    name: (label, text, sortValue) => ({
+      key: 'nombre',
+      label,
+      type: 'text',
+      sortValue: sortValue || text,
+      headClass: 'sticky left-[calc(3.25rem_-_1px)] z-20 bg-surface border-r border-line',
+      cellClass: (r, i) => `sticky left-[calc(3.25rem_-_1px)] z-10 border-r border-line ${stickyBg(i)}`,
+      render: (r) => `<div class="max-w-[9.5rem] truncate font-semibold text-ink sm:max-w-[16rem]" title="${U.escapeHtml(text(r))}">${U.escapeHtml(text(r))}</div>`,
+    }),
+    count: () => ({
+      key: 'count',
+      label: 'Cantidad de canales',
+      align: 'right',
+      render: (r) =>
+        `<div class="bar-cell"><div class="bar-track"><div class="bar-fill" style="width:${(r.share * 100).toFixed(1)}%"></div></div><span class="font-bold">${U.fmt(r.count)}</span></div>`,
+    }),
+    pesoProm: () => ({ key: 'pesoProm', label: 'Peso promedio (kg)', align: 'right', render: (r) => U.fmt(r.pesoProm, 1) }),
+    cvPeso: () => ({
+      key: 'cvPeso',
+      label: 'CV Peso (%)',
+      align: 'right',
+      // Con 1 canal la desviación no está definida: se muestra "—" en lugar de NaN
+      render: (r) =>
+        Number.isFinite(r.cvPeso)
+          ? `<span class="num">${U.fmtPct(r.cvPeso, 2)}</span>`
+          : `<span class="num text-grey-mid" title="Se requieren al menos 2 canales">—</span>`,
+    }),
+    magroProm: () => ({ key: 'magroProm', label: 'Promedio % magro', align: 'right', render: (r) => U.fmtPct(r.magroProm, 2) }),
+    grasaProm: () => ({ key: 'grasaProm', label: 'Promedio grasa dorsal (mm)', align: 'right', render: (r) => U.fmt(r.grasaProm, 1) }),
+    iqProm: () => ({
+      key: 'iqProm',
+      // Icono de ayuda: muestra el globo (módulo Tooltip, 5.4) y no reordena la columna
+      label: `IQ-Col promedio<span class="info-tip" tabindex="0" data-no-sort data-tip="${IQ_TIP}" aria-label="Qué es el IQ-Col promedio">${INFO_SVG}</span>`,
+      align: 'right',
+      render: (r) => U.fmt(r.iqProm, 1),
+    }),
+    /** Orden por jerarquía de calidad (S → P), no alfabético. */
+    seuTop: () => ({ key: 'seuTop', label: 'Cat. SEUROP', align: 'center', defaultDir: 'asc', render: (r) => seuropLetterBox(r.seuTop) }),
+  };
+})();
+
+/* --------------------------------------------------------------------------
  * 5.4 Tooltip — globo de ayuda para cualquier elemento con [data-tip].
  *     Aparece con hover o foco de teclado. Un único globo con posición fija en
  *     <body>, para que no lo recorten los contenedores con scroll (tablas).
@@ -1203,7 +1302,7 @@ App.views.inicio = (function () {
   const D = App.data;
   const C = App.charts;
   const F = App.filters;
-  const { DataTable } = App.components;
+  const { DataTable, RankingCols } = App.components;
 
   const RANKING_PAGE_SIZE = 10;
 
@@ -1213,9 +1312,6 @@ App.views.inicio = (function () {
   let dirty = false;
   let lastAgg = null; // última agregación: cambiar el eje X no vuelve a agregar
   let periodosMode = 'tiempo'; // modo con el que se configuró el orden de la tabla sincronizada
-
-  const IQ_TIP = 'Modelo propio de Alura. Calidad del canal según peso y % de magro frente al rango del país.';
-  const INFO_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>';
 
   const SERIES = {
     peso: { name: 'Peso promedio (kg)', color: '#dcb3b0', hover: T.primary, unit: 'kg', dec: 1 },
@@ -1527,72 +1623,21 @@ App.views.inicio = (function () {
 
   /* ---------- Tablas ------------------------------------------------------- */
 
-  /*
-   * Columnas fijas del ranking (# y Granja): al desplazar la tabla en horizontal
-   * (móvil) quedan visibles. Fondo explícito según la fila (impar bg-white, par
-   * bg-surface, igual que .data-table--striped) y borde derecho en la última
-   * fija, para que las demás columnas no se vean por debajo.
-   */
-  const POS_W = 'w-[3.25rem] min-w-[3.25rem] max-w-[3.25rem]';
-  const stickyBg = (i) => `${i % 2 ? 'bg-surface' : 'bg-white'} group-hover:bg-row-hover`;
+  /* Columnas del ranking: compartidas con Scores (App.components.RankingCols). Las dos primeras quedan fijas (móvil). */
+  const seuropLetterBox = RankingCols.seuropLetterBox;
 
   function rankingColumns() {
     return [
-      // Posición según el orden activo; continúa entre páginas (11–20 en la página 2…)
-      {
-        key: 'pos',
-        label: '#',
-        align: 'right',
-        sortable: false,
-        headClass: `sticky left-0 z-20 bg-surface ${POS_W}`,
-        cellClass: (r, i) => `sticky left-0 z-10 ${POS_W} ${stickyBg(i)}`,
-        render: (r, pos) => `<span class="num font-semibold text-grey-mid">${U.fmt(pos)}</span>`,
-      },
-      {
-        key: 'nombre',
-        label: 'Granja',
-        type: 'text',
-        headClass: 'sticky left-[calc(3.25rem_-_1px)] z-20 bg-surface border-r border-line',
-        cellClass: (r, i) => `sticky left-[calc(3.25rem_-_1px)] z-10 border-r border-line ${stickyBg(i)}`,
-        render: (r) => `<div class="max-w-[9.5rem] truncate font-semibold text-ink sm:max-w-[16rem]" title="${U.escapeHtml(r.nombre)}">${U.escapeHtml(r.nombre)}</div>`,
-      },
-      {
-        key: 'count',
-        label: 'Cantidad de canales',
-        align: 'right',
-        render: (r) =>
-          `<div class="bar-cell"><div class="bar-track"><div class="bar-fill" style="width:${(r.share * 100).toFixed(1)}%"></div></div><span class="font-bold">${U.fmt(r.count)}</span></div>`,
-      },
-      { key: 'pesoProm', label: 'Peso promedio (kg)', align: 'right', render: (r) => U.fmt(r.pesoProm, 1) },
-      {
-        key: 'cvPeso',
-        label: 'CV Peso (%)',
-        align: 'right',
-        // Con 1 canal la desviación no está definida: se muestra "—" en lugar de NaN
-        render: (r) =>
-          Number.isFinite(r.cvPeso)
-            ? `<span class="num">${U.fmtPct(r.cvPeso, 2)}</span>`
-            : `<span class="num text-grey-mid" title="Se requieren al menos 2 canales">—</span>`,
-      },
-      { key: 'magroProm', label: 'Promedio % magro', align: 'right', render: (r) => U.fmtPct(r.magroProm, 2) },
-      { key: 'grasaProm', label: 'Promedio grasa dorsal (mm)', align: 'right', render: (r) => U.fmt(r.grasaProm, 1) },
-      {
-        key: 'iqProm',
-        // Icono de ayuda: muestra el globo (módulo Tooltip, 5.4) y no reordena la columna
-        label: `IQ-Col promedio<span class="info-tip" tabindex="0" data-no-sort data-tip="${IQ_TIP}" aria-label="Qué es el IQ-Col promedio">${INFO_SVG}</span>`,
-        align: 'right',
-        render: (r) => U.fmt(r.iqProm, 1),
-      },
-      // Orden por jerarquía de calidad (S → P), no alfabético
-      { key: 'seuTop', label: 'Cat. SEUROP', align: 'center', defaultDir: 'asc', render: (r) => seuropLetterBox(r.seuTop) },
+      RankingCols.pos(),
+      RankingCols.name('Granja', (r) => r.nombre),
+      RankingCols.count(),
+      RankingCols.pesoProm(),
+      RankingCols.cvPeso(),
+      RankingCols.magroProm(),
+      RankingCols.grasaProm(),
+      RankingCols.iqProm(),
+      RankingCols.seuTop(),
     ];
-  }
-
-  /** Recuadro con la letra SEUROP y su color exacto de la paleta. */
-  function seuropLetterBox(i) {
-    const s = U.SEUROP[i];
-    return `<span class="num inline-flex h-7 w-7 items-center justify-center rounded-[7px] font-display text-[0.75rem] font-bold text-white"
-      style="background-color:${s.color}" title="${s.letter} · ${s.key}" aria-label="Categoría ${s.letter} (${s.key})">${s.letter}</span>`;
   }
 
   /** Columnas de la tabla sincronizada: la primera es el Periodo o la Granja según el eje X. */
@@ -2029,10 +2074,13 @@ App.views.despacho = (function () {
 })();
 
 /* --------------------------------------------------------------------------
- * 7.3 SCORES — usa los filtros globales (fechas, planta, granja, granularidad)
+ * 7.3 SCORES — usa los filtros globales (fechas, planta, comercializador, granja, granularidad)
  *     sobre los datos del complementario (additional_data_cipa.parquet):
- *       · Rendimiento Canal: barras (kg caliente / frío) + líneas (% Rto.)
- *       · Tiempos en Planta: Gantt horizontal apilado (Espera · Reposo · Proceso · Frío)
+ *       · Rendimiento Canal: peso caliente promedio por canal (barras) + % Rto. caliente (línea),
+ *         con una tabla de ranking debajo cuya primera columna sigue la variable "Agrupar por".
+ *       · Tiempos en Planta: Gantt horizontal apilado (Espera · Reposo · Proceso), con el
+ *         rendimiento en el tooltip y fases que se pueden ocultar desde la leyenda.
+ *     Scores no usa nada del proceso en frío (peso_canal_frio / fecha_peso_canal_frio).
  *     Los valores del complementario son TOTALES POR LOTE (por fecha + turno en
  *     Efege): cada canal trae el mismo valor de su lote. Antes de sumar o
  *     promediar se toma UN registro por lote dentro de cada grupo (`groupLots`).
@@ -2042,20 +2090,27 @@ App.views.scores = (function () {
   const T = App.tokens;
   const U = App.utils;
   const C = App.charts;
+  const D = App.data;
   const F = App.filters;
+  const { DataTable, RankingCols } = App.components;
 
   const EMPTY_MSG = 'Sin registros de proceso para los filtros seleccionados';
   const byText = new Intl.Collator('es', { sensitivity: 'base', numeric: true }).compare;
 
-  // Variable de agrupación (sin "Comercializador": queda para la siguiente iteración)
+  // Variable de agrupación (Rendimiento Canal, su tabla y Tiempos en Planta)
   const DIMS = [
     { key: 'tiempo', label: 'Tiempo' },
     { key: 'granja', label: 'Granja' },
     { key: 'planta', label: 'Planta' },
     { key: 'rango', label: 'Rango de peso' },
+    { key: 'comercializador', label: 'Comercializador' },
   ];
   const dimLabel = (key) => (DIMS.find((d) => d.key === key) || {}).label || key;
+  /** Muchas categorías con nombres largos: de mayor a menor volumen, etiquetas inclinadas y dataZoom desde el inicio. */
+  const byVolume = (dim) => dim === 'granja' || dim === 'comercializador';
+  const DIM_UNIT = { tiempo: 'periodos', granja: 'granjas', planta: 'plantas', rango: 'rangos de peso', comercializador: 'comercializadores' };
 
+  const RANKING_PAGE_SIZE = 10;
   const GANTT_LAST = 15; // lotes/turnos del modo por defecto
   const GANTT_MAX_GROUPS = 30; // filas máximas del modo agrupado (el Gantt crece en alto con cada fila)
   const GANTT_PLANTAS = ['Efege', 'Supercerdo Paisa', 'Progresar'];
@@ -2069,29 +2124,29 @@ App.views.scores = (function () {
     { key: 'espera', label: 'Espera', color: T.warn, from: 'fecha_ingreso_planta', to: 'fecha_pesaje_pie' },
     { key: 'reposo', label: 'Reposo', color: T.primary, from: 'fecha_pesaje_pie', to: 'fecha_sacrificio' },
     { key: 'proceso', label: 'Proceso', color: T.accent, from: 'fecha_sacrificio', to: 'fecha_peso_canal_caliente' },
-    { key: 'frio', label: 'Frío', color: T.good, from: 'fecha_peso_canal_caliente', to: 'fecha_peso_canal_frio' },
   ];
   const PHASES_BY_PLANTA = {
     Efege: ['espera', 'reposo'],
-    'Supercerdo Paisa': ['reposo', 'proceso', 'frio'],
-    Progresar: ['reposo', 'proceso', 'frio'],
+    'Supercerdo Paisa': ['reposo', 'proceso'],
+    Progresar: ['reposo', 'proceso'],
   };
 
   const RTO = {
-    cal: { name: 'Peso Canal Caliente', color: T.primary },
-    fr: { name: 'Peso Canal Frío', color: T.primarySoft },
+    cal: { name: 'Peso Canal Caliente promedio', color: T.primary },
     rtoCal: { name: '% Rto. Caliente', color: T.warn },
-    rtoFr: { name: '% Rto. Frío', color: T.good },
   };
 
-  // Estado propio de la vista (solo visual); los filtros viven en App.filters
-  const state = { rend: { dim: 'tiempo' }, gantt: { dim: 'lotes', planta: 'Efege' } };
+  // Estado propio de la vista (solo visual); los filtros viven en App.filters.
+  // gantt.hidden: fases desactivadas desde la leyenda (se conservan al cambiar de planta o de filtros)
+  const state = { rend: { dim: 'tiempo' }, gantt: { dim: 'lotes', planta: 'Efege', hidden: new Set() } };
   let dirty = false;
-  let lastGantt = null; // vista calculada del Gantt: redibujar al cambiar el ancho no recalcula
+  let lastGantt = null; // vista calculada del Gantt: redibujar al cambiar el ancho o las fases no recalcula
   let ganttWidth = 0;
+  let rankingDim = null; // variable con la que se configuró el orden de la tabla de ranking
 
   const ui = {};
   const charts = {};
+  const tables = {};
 
   /* ---------- Plantilla ---------------------------------------------------- */
 
@@ -2103,10 +2158,10 @@ App.views.scores = (function () {
       </div>
     </div>`;
 
-  const cardHead = (title, subRef, controls) => `
+  const cardHead = (title, subRef, controls, titleRef) => `
     <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0">
-        <h2 class="card-title">${title}</h2>
+        <h2 class="card-title"${titleRef ? ` data-ref="${titleRef}"` : ''}>${title}</h2>
         <p class="card-subtitle" data-ref="${subRef}"></p>
       </div>
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2">${controls}</div>
@@ -2117,6 +2172,11 @@ App.views.scores = (function () {
       <section class="mb-6 rounded-[18px] border border-line bg-white p-5 shadow-card">
         ${cardHead('Rendimiento Canal', 'rendSub', pill('rend', 'Agrupar por:', DIMS))}
         <div data-ref="chartRend" style="height:400px"></div>
+      </section>
+
+      <section class="mb-6 rounded-[18px] border border-line bg-white p-5 shadow-card">
+        ${cardHead('Ranking', 'rankSub', '', 'rankTitle')}
+        <div data-ref="tableRank"></div>
       </section>
 
       <section class="rounded-[18px] border border-line bg-white p-5 shadow-card">
@@ -2146,7 +2206,10 @@ App.views.scores = (function () {
     return `${r.planta}|${r.id_lote}`;
   }
 
-  /** Grupo → (llave de lote → primer registro del lote en ese grupo). */
+  /**
+   * Grupo → (llave de lote → { r: primer registro del lote en ese grupo, n: canales del lote en el grupo }).
+   * Los valores de proceso se toman de `r` (una vez por lote); `n` sirve para promediar por canal (ver `rendimiento`).
+   */
   function groupLots(rows, groupOf) {
     const groups = new Map();
     for (const r of rows) {
@@ -2156,7 +2219,9 @@ App.views.scores = (function () {
       if (g == null) continue;
       let lots = groups.get(g);
       if (!lots) groups.set(g, (lots = new Map()));
-      if (!lots.has(lk)) lots.set(lk, r);
+      const lot = lots.get(lk);
+      if (lot) lot.n++;
+      else lots.set(lk, { r, n: 1 });
     }
     return groups;
   }
@@ -2171,111 +2236,106 @@ App.views.scores = (function () {
         return (r) => r.granja;
       case 'planta':
         return (r) => r.planta;
+      case 'comercializador':
+        return (r) => r.comercializador; // sin comercializador (null): el canal no se agrupa
       default:
         return (r) => U.getClasePesoCanal(r.peso_kg);
     }
   }
 
-  /** Ordena y rotula los grupos: tiempo y rango cronológico/ascendente, granja por volumen, planta alfabético. */
+  const groupLabel = (dim, key) => (dim === 'tiempo' ? U.periodLabel(F.state.gran, key) : key);
+
+  /** Ordena y rotula los grupos: tiempo y rango cronológico/ascendente, granja y comercializador por volumen, planta alfabético. */
   function sortGroups(dim, items) {
-    if (dim === 'granja') items.sort((a, b) => b.n - a.n || byText(a.key, b.key));
+    if (byVolume(dim)) items.sort((a, b) => b.n - a.n || byText(a.key, b.key));
     else if (dim === 'planta') items.sort((a, b) => byText(a.key, b.key));
     else items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    const gran = F.state.gran;
-    items.forEach((it) => (it.label = dim === 'tiempo' ? U.periodLabel(gran, it.key) : it.key));
+    items.forEach((it) => (it.label = groupLabel(dim, it.key)));
     return items;
   }
 
   /* ---------- Rendimiento Canal -------------------------------------------- */
 
-  /**
-   * Métricas de un grupo a partir de sus lotes únicos.
-   *  % Rto. caliente = Σ caliente / Σ pie, solo lotes con ambos > 0
-   *  % Rto. frío     = Σ frío / Σ pie, solo lotes con frío > 0 y pie > 0
-   * (un lote sin pie o sin frío no entra ni al numerador ni al denominador).
-   */
-  function rendimiento(lots) {
-    let cal = 0, fr = 0, calNum = 0, calDen = 0, frNum = 0, frDen = 0;
-    for (const r of lots.values()) {
-      const c = r.peso_canal_caliente;
-      const f = r.peso_canal_frio;
-      const p = r.peso_pie;
-      if (c > 0) cal += c;
-      if (f > 0) fr += f;
-      if (c > 0 && p > 0) {
-        calNum += c;
-        calDen += p;
-      }
-      if (f > 0 && p > 0) {
-        frNum += f;
-        frDen += p;
+  /** % Rto. caliente de un lote: Σ caliente / Σ pie, solo con ambos > 0; null si falta alguno. */
+  const rtoLote = (r) => (r.peso_canal_caliente > 0 && r.peso_pie > 0 ? (r.peso_canal_caliente / r.peso_pie) * 100 : null);
+
+  let lotSizes = null; // llave de lote → canales del lote en todo el dataset (sin filtros), calculado una vez
+
+  function lotSize(lk, fallback) {
+    if (!lotSizes) {
+      lotSizes = new Map();
+      for (const r of D.filter({ desde: D.minDate, hasta: D.maxDate })) {
+        const k = loteKey(r);
+        if (k !== null) lotSizes.set(k, (lotSizes.get(k) || 0) + 1);
       }
     }
-    return { n: lots.size, cal, fr, rtoCal: calDen ? (calNum / calDen) * 100 : null, rtoFr: frDen ? (frNum / frDen) * 100 : null };
+    return lotSizes.get(lk) || fallback;
+  }
+
+  /**
+   * Métricas de un grupo a partir de sus lotes únicos.
+   *  calProm = Σ caliente / canales con ese dato (kg por canal; solo lotes con caliente > 0). Un lote que el grupo
+   *            solo tiene en parte (p. ej. al agrupar por rango de peso, granja o comercializador) aporta su total
+   *            prorrateado por la fracción de sus canales que caen en el grupo; con lotes completos es Σ caliente / Σ canales.
+   *  rtoCal  = Σ caliente / Σ pie × 100, solo lotes con ambos > 0
+   * (un lote sin pie no entra ni al numerador ni al denominador del %).
+   */
+  function rendimiento(lots) {
+    let cal = 0, canales = 0, num = 0, den = 0;
+    for (const [lk, { r, n }] of lots) {
+      const c = r.peso_canal_caliente;
+      const p = r.peso_pie;
+      if (c > 0) {
+        cal += c * (n / lotSize(lk, n));
+        canales += n;
+      }
+      if (c > 0 && p > 0) {
+        num += c;
+        den += p;
+      }
+    }
+    return { n: lots.size, calProm: canales ? cal / canales : null, rtoCal: den ? (num / den) * 100 : null };
   }
 
   function renderRendimiento(rows) {
     const dim = state.rend.dim;
     const gran = F.state.gran;
     ui.rendSub.textContent =
-      `Peso por lote único en barras (eje izquierdo) · % de rendimiento sobre el peso en pie en líneas (eje derecho) · ` +
+      `Peso caliente promedio por canal en barras (eje izquierdo) · % de rendimiento sobre el peso en pie en línea (eje derecho) · ` +
       (dim === 'tiempo' ? `por ${U.granLabel(gran).toLowerCase()}` : `por ${dimLabel(dim).toLowerCase()}`);
 
     const items = [];
     for (const [key, lots] of groupLots(rows, groupOf(dim))) {
       const m = rendimiento(lots);
-      if (m.cal > 0 || m.fr > 0) items.push({ key, ...m });
+      if (m.calProm !== null) items.push({ key, ...m });
     }
     if (!items.length) return C.setEmpty(charts.rend, EMPTY_MSG);
     sortGroups(dim, items);
 
-    const byGranja = dim === 'granja';
+    const longLabels = byVolume(dim);
     const labels = items.map((i) => i.label);
     const axis = C.categoryAxis(labels);
-    if (byGranja) axis.axisLabel = { ...axis.axisLabel, interval: 0, rotate: 35, width: 110, overflow: 'truncate', hideOverlap: false };
-    const zoom = byGranja ? C.zoomFor(items.length, Math.max(6, Math.floor(ui.chartRend.clientWidth / 56)), true) : C.zoomFor(items.length);
-
-    const bar = (key, field, extra) => ({
-      name: RTO[key].name,
-      type: 'bar',
-      yAxisIndex: 0,
-      barMaxWidth: 30,
-      emphasis: { focus: 'series' },
-      data: items.map((i) => Math.round(i[field])),
-      ...extra,
-    });
-    const line = (key, field) => ({
-      name: RTO[key].name,
-      type: 'line',
-      yAxisIndex: 1,
-      smooth: 0.25,
-      symbol: 'circle',
-      symbolSize: 7,
-      showSymbol: items.length <= 60,
-      lineStyle: { width: 2.5 },
-      itemStyle: { color: RTO[key].color, borderColor: '#fff', borderWidth: 1.5 },
-      emphasis: { focus: 'series' },
-      data: items.map((i) => (i[field] === null ? null : +i[field].toFixed(2))),
-    });
+    if (longLabels) axis.axisLabel = { ...axis.axisLabel, interval: 0, rotate: 35, width: 110, overflow: 'truncate', hideOverlap: false };
+    const zoom = longLabels ? C.zoomFor(items.length, Math.max(6, Math.floor(ui.chartRend.clientWidth / 56)), true) : C.zoomFor(items.length);
 
     charts.rend.setOption(
       {
         textStyle: C.textStyle,
         animationDuration: 450,
         legend: { ...C.legend, data: Object.values(RTO).map((s) => s.name) },
-        grid: { left: byGranja ? 40 : 4, right: 4, top: 58, bottom: zoom ? 44 : 4, containLabel: true },
+        grid: { left: longLabels ? 40 : 4, right: 4, top: 58, bottom: zoom ? 44 : 4, containLabel: true },
         tooltip: {
           ...C.tooltip,
           trigger: 'axis',
           axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(153,57,53,.06)' } },
           formatter: (params) => {
             const i = params[0].dataIndex;
-            let html = C.tipHeader(labels[i], `${U.fmt(items[i].n)} lotes`);
+            let html = C.tipHeader(U.escapeHtml(labels[i]), `${U.fmt(items[i].n)} lotes`);
             params.forEach((p) => {
               const s = Object.values(RTO).find((x) => x.name === p.seriesName);
               const isPct = p.seriesName.startsWith('%');
-              const v = typeof p.value === 'number' ? (isPct ? U.fmtPct(p.value, 2) : `${U.fmt(p.value)} kg`) : '—';
-              html += C.tipRow(s.color === T.primarySoft ? T.primary : s.color, p.seriesName, v);
+              const v = typeof p.value === 'number' ? (isPct ? U.fmtPct(p.value, 2) : `${U.fmt(p.value, 1)} kg`) : '—';
+              html += C.tipRow(s.color, p.seriesName, v);
             });
             return html;
           },
@@ -2284,7 +2344,7 @@ App.views.scores = (function () {
         yAxis: [
           {
             type: 'value',
-            name: 'Peso (kg)',
+            name: 'Peso promedio (kg)',
             nameTextStyle: { color: C.AXIS.name, align: 'left', fontWeight: 600 },
             min: 0,
             axisLabel: { color: C.AXIS.label, formatter: (v) => U.fmt(v) },
@@ -2304,14 +2364,87 @@ App.views.scores = (function () {
         ],
         dataZoom: zoom || [],
         series: [
-          bar('cal', 'cal', { itemStyle: { color: RTO.cal.color, borderRadius: [5, 5, 0, 0] } }),
-          bar('fr', 'fr', { itemStyle: { color: RTO.fr.color, borderColor: T.primary, borderWidth: 1.5, borderRadius: [5, 5, 0, 0] } }),
-          line('rtoCal', 'rtoCal'),
-          line('rtoFr', 'rtoFr'),
+          {
+            name: RTO.cal.name,
+            type: 'bar',
+            yAxisIndex: 0,
+            barMaxWidth: 30,
+            emphasis: { focus: 'series' },
+            itemStyle: { color: RTO.cal.color, borderRadius: [5, 5, 0, 0] },
+            data: items.map((i) => +i.calProm.toFixed(1)),
+          },
+          {
+            name: RTO.rtoCal.name,
+            type: 'line',
+            yAxisIndex: 1,
+            smooth: 0.25,
+            symbol: 'circle',
+            symbolSize: 7,
+            showSymbol: items.length <= 60,
+            lineStyle: { width: 2.5 },
+            itemStyle: { color: RTO.rtoCal.color, borderColor: '#fff', borderWidth: 1.5 },
+            emphasis: { focus: 'series' },
+            data: items.map((i) => (i.rtoCal === null ? null : +i.rtoCal.toFixed(2))),
+          },
         ],
       },
       true
     );
+  }
+
+  /* ---------- Ranking (tabla bajo Rendimiento Canal) ------------------------ */
+
+  /** Columnas: la de agrupación sigue la variable elegida; el resto replica "Ranking por granja" + Rendimiento en canal. */
+  function rankingColumns(dim) {
+    const first = RankingCols.name(dim === 'tiempo' ? `Periodo (${U.granLabel(F.state.gran)})` : dimLabel(dim), (r) => groupLabel(dim, r.key), (r) => r.key);
+    return [
+      RankingCols.pos(),
+      first,
+      RankingCols.count(),
+      RankingCols.pesoProm(),
+      RankingCols.magroProm(),
+      RankingCols.grasaProm(),
+      RankingCols.iqProm(),
+      RankingCols.seuTop(),
+      RankingCols.cvPeso(),
+      {
+        key: 'rtoCal',
+        label: 'Rendimiento en canal (%)',
+        align: 'right',
+        render: (r) => (r.rtoCal === null ? '<span class="num text-grey-mid" title="Sin peso en pie o peso caliente">—</span>' : `<span class="num">${U.fmtPct(r.rtoCal, 2)}</span>`),
+      },
+    ];
+  }
+
+  /** Una fila por valor de la variable: métricas sobre todos sus canales; el rendimiento, sobre sus lotes únicos. */
+  function renderRanking(rows) {
+    const dim = state.rend.dim;
+    const keyOf = groupOf(dim);
+    const lots = groupLots(rows, keyOf);
+    const data = D.aggregateBy(rows, keyOf);
+    const maxCount = data.reduce((m, g) => Math.max(m, g.count), 0);
+    for (const g of data) {
+      g.share = maxCount ? g.count / maxCount : 0;
+      const l = lots.get(g.key);
+      g.rtoCal = l ? rendimiento(l).rtoCal : null;
+    }
+
+    const what = dim === 'tiempo' ? 'periodo' : dimLabel(dim).toLowerCase();
+    ui.rankTitle.textContent = `Ranking por ${what}`;
+    ui.rankSub.textContent =
+      `Consolidado por ${what} · ${RANKING_PAGE_SIZE} por página · Rendimiento en canal = Σ peso caliente / Σ peso en pie de los lotes únicos` +
+      (dim === 'comercializador' ? ' · no incluye canales sin comercializador' : '') +
+      ' · haga clic en un encabezado para reordenar';
+
+    // Al cambiar de variable la tabla adopta el orden de la gráfica (periodo/rango asc, el resto por volumen desc)
+    if (dim !== rankingDim) {
+      const cronologico = dim === 'tiempo' || dim === 'rango';
+      tables.rank.setSort(cronologico ? 'nombre' : 'count', cronologico ? 'asc' : 'desc');
+      rankingDim = dim;
+    }
+    tables.rank.unit = DIM_UNIT[dim];
+    tables.rank.setColumns(rankingColumns(dim));
+    tables.rank.setRows(data);
   }
 
   /* ---------- Tiempos en Planta (Gantt) ------------------------------------ */
@@ -2360,7 +2493,7 @@ App.views.scores = (function () {
       .map(({ r, h }) => {
         const fecha = `${r.fecha_sacrificio.slice(8, 10)}/${r.fecha_sacrificio.slice(5, 7)}`;
         const id = planta === 'Efege' ? `Com. ${r.turno}` : `Lote ${r.id_lote}`;
-        return { label: `${fecha} · ${id}`, h, comp, n: 1, total: sumHours(h, comp) };
+        return { label: `${fecha} · ${id}`, h, comp, n: 1, rto: rtoLote(r) };
       });
   }
 
@@ -2373,7 +2506,7 @@ App.views.scores = (function () {
       const comp = PHASES_BY_PLANTA[byPlanta ? key : planta];
       const sum = {};
       const cnt = {};
-      for (const r of lots.values()) {
+      for (const { r } of lots.values()) {
         const h = phaseHours(r);
         for (const k of comp) {
           if (h[k] === null) continue;
@@ -2383,13 +2516,12 @@ App.views.scores = (function () {
       }
       const h = {};
       for (const k of comp) h[k] = cnt[k] ? sum[k] / cnt[k] : null;
-      const total = sumHours(h, comp);
-      if (total > 0) items.push({ key, h, comp, n: lots.size, total });
+      if (sumHours(h, comp) > 0) items.push({ key, h, comp, n: lots.size, rto: rendimiento(lots).rtoCal });
     }
     sortGroups(dim, items);
     if (items.length <= GANTT_MAX_GROUPS) return { items, truncated: false };
-    // Tiempo: los periodos más recientes · Granja: las de mayor volumen (ya vienen ordenadas así)
-    return { items: dim === 'granja' ? items.slice(0, GANTT_MAX_GROUPS) : items.slice(-GANTT_MAX_GROUPS), truncated: true };
+    // Tiempo: los periodos más recientes · Granja y Comercializador: los de mayor volumen (ya vienen ordenados así)
+    return { items: byVolume(dim) ? items.slice(0, GANTT_MAX_GROUPS) : items.slice(-GANTT_MAX_GROUPS), truncated: true };
   }
 
   function computeGantt(rows) {
@@ -2401,9 +2533,9 @@ App.views.scores = (function () {
     } else {
       const gran = dim === 'tiempo' ? ` por ${U.granLabel(F.state.gran).toLowerCase()}` : ` por ${dimLabel(dim).toLowerCase()}`;
       sub = `${dim === 'planta' ? 'Comparativo entre plantas' : planta} · promedio de horas por fase de los lotes únicos${gran}`;
-      if (truncated) sub += dim === 'granja' ? ` · ${GANTT_MAX_GROUPS} granjas con más lotes` : ` · últimos ${GANTT_MAX_GROUPS} periodos`;
+      if (truncated) sub += byVolume(dim) ? ` · ${GANTT_MAX_GROUPS} ${DIM_UNIT[dim]} con más lotes` : ` · últimos ${GANTT_MAX_GROUPS} periodos`;
     }
-    return { items, sub };
+    return { items, sub: `${sub} · clic en la leyenda para ocultar una fase` };
   }
 
   function drawGantt() {
@@ -2417,9 +2549,13 @@ App.views.scores = (function () {
     ganttWidth = el.clientWidth;
     if (!items.length) return C.setEmpty(charts.gantt, EMPTY_MSG);
 
-    // Solo las fases que aparecen en alguna fila (Efege: Espera + Reposo · Supercerdo y Progresar: Reposo + Proceso + Frío)
+    // Solo las fases que aparecen en alguna fila (Efege: Espera + Reposo · Supercerdo y Progresar: Reposo + Proceso)
     const phases = PHASES.filter((p) => items.some((it) => it.comp.includes(p.key)));
-    const maxTotal = Math.max(...items.map((it) => it.total));
+    // El total (barra, tooltip y rótulo derecho) suma únicamente las fases activas en la leyenda
+    const hidden = state.gantt.hidden;
+    const activeOf = (it) => it.comp.filter((k) => !hidden.has(k));
+    const totalOf = (it) => sumHours(it.h, activeOf(it));
+    const maxTotal = Math.max(...items.map(totalOf));
     const xMax = Math.max(1, Math.ceil(maxTotal / 5) * 5);
     // Ancho estimado del área de barras para ocultar rótulos de segmentos estrechos
     const pxPerHour = Math.max(100, el.clientWidth - GANTT_LABEL_W - GANTT_TOTAL_W - 8) / xMax;
@@ -2448,20 +2584,26 @@ App.views.scores = (function () {
       {
         textStyle: C.textStyle,
         animationDuration: 450,
-        // Sin selección: ocultar una fase dejaría el total de la derecha desactualizado
-        legend: { ...C.legend, selectedMode: false, data: phases.map((p) => p.label) },
+        legend: {
+          ...C.legend,
+          selectedMode: 'multiple',
+          data: phases.map((p) => p.label),
+          selected: Object.fromEntries(phases.map((p) => [p.label, !hidden.has(p.key)])),
+        },
         grid: { left: 8, right: GANTT_TOTAL_W, top: 40, bottom: 8, containLabel: true },
         tooltip: {
           ...C.tooltip,
           trigger: 'axis',
           axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(153,57,53,.06)' } },
           formatter: (params) => {
+            if (!params.length) return '';
             const it = items[params[0].dataIndex];
-            let html = C.tipHeader(it.label, it.n > 1 ? `${U.fmt(it.n)} lotes` : '');
+            let html = C.tipHeader(U.escapeHtml(it.label), it.n > 1 ? `${U.fmt(it.n)} lotes` : '');
             for (const p of phases) {
-              if (it.comp.includes(p.key) && it.h[p.key] > 0) html += C.tipRow(p.color, p.label, `${U.fmt(it.h[p.key], 1)} h`);
+              if (!hidden.has(p.key) && it.comp.includes(p.key) && it.h[p.key] > 0) html += C.tipRow(p.color, p.label, `${U.fmt(it.h[p.key], 1)} h`);
             }
-            return html + C.tipRow(T.greyLight, 'Total', `${U.fmt(it.total, 1)} h`);
+            html += C.tipRow(T.greyLight, 'Total', `${U.fmt(totalOf(it), 1)} h`);
+            return html + C.tipRow(RTO.rtoCal.color, 'Rendimiento en canal', it.rto === null ? 'N/D' : U.fmtPct(it.rto, 2));
           },
         },
         // Categorías por posición: dos lotes pueden compartir etiqueta
@@ -2488,7 +2630,7 @@ App.views.scores = (function () {
         },
         series: [
           ...phases.map(segment),
-          // Serie invisible solo para rotular el total al final de cada barra
+          // Serie invisible (fuera de la leyenda) solo para rotular el total de las fases activas al final de cada barra
           {
             name: 'Total',
             type: 'bar',
@@ -2504,7 +2646,7 @@ App.views.scores = (function () {
               fontSize: 12,
               formatter: (d) => `${U.fmt(d.value, 1)} h`,
             },
-            data: items.map((it) => it.total),
+            data: items.map(totalOf),
           },
         ],
       },
@@ -2537,6 +2679,7 @@ App.views.scores = (function () {
     dirty = false;
     const rows = F.rows();
     renderRendimiento(rows);
+    renderRanking(rows);
     renderGantt(rows);
   }
 
@@ -2545,7 +2688,7 @@ App.views.scores = (function () {
     ui.root = container;
     container.querySelectorAll('[data-ref]').forEach((n) => (ui[n.dataset.ref] = n));
 
-    // Cualquier cambio de filtro (incluida la granularidad) afecta a ambas gráficas
+    // Cualquier cambio de filtro (incluida la granularidad) afecta a gráficas y tabla
     F.subscribe(() => {
       if (container.hidden) dirty = true;
       else update();
@@ -2560,7 +2703,10 @@ App.views.scores = (function () {
         if (state.rend.dim === value) return;
         state.rend.dim = value;
         syncPills();
-        renderRendimiento(F.rows());
+        const rows = F.rows();
+        renderRendimiento(rows);
+        renderRanking(rows); // la primera columna de la tabla sigue a esta variable
+        charts.rend.resize();
       } else {
         if (state.gantt[name === 'planta' ? 'planta' : 'dim'] === value) return;
         state.gantt[name === 'planta' ? 'planta' : 'dim'] = value;
@@ -2571,6 +2717,27 @@ App.views.scores = (function () {
 
     charts.rend = C.create(ui.chartRend);
     charts.gantt = C.create(ui.chartGantt);
+
+    tables.rank = new DataTable(ui.tableRank, {
+      columns: rankingColumns(state.rend.dim),
+      sortKey: 'nombre',
+      sortDir: 'asc',
+      striped: true, // las celdas fijas alternan fondo igual que el resto de la fila
+      pageSize: RANKING_PAGE_SIZE,
+      pagerStyle: 'simple',
+      pagerClass: 'mt-3 mb-1 rounded-[20px] border border-line bg-surface px-4',
+      unit: DIM_UNIT[state.rend.dim],
+    });
+
+    // Leyenda interactiva: ocultar/mostrar una fase redibuja el Gantt con el total de las fases activas
+    charts.gantt.on('legendselectchanged', (e) => {
+      for (const p of PHASES) {
+        if (!(p.label in e.selected)) continue;
+        if (e.selected[p.label]) state.gantt.hidden.delete(p.key);
+        else state.gantt.hidden.add(p.key);
+      }
+      setTimeout(drawGantt, 0); // fuera del ciclo de render del propio evento
+    });
 
     // El rótulo de cada segmento depende del ancho: se redibuja (sin recalcular) cuando este cambia
     if ('ResizeObserver' in window) {
