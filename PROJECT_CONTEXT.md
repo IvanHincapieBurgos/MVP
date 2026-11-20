@@ -109,7 +109,7 @@ Los mensajes avanzan por etapas: "Cargando información del sistema..." → "Obt
 | `data_utils.js` | `window.DataUtils`: cálculo del tiempo de espera ingreso → sacrificio (`calcularTiempoEsperaSacrificio`, `aplicarTiempoEsperaSacrificio`). |
 | `seurop_quartiles.js` | Cuartiles Q25/Q75 por país y año para el IQ-Col (generado; no editar a mano). |
 | `data_loader.js` | Módulo ES: espera la sesión, `loadDataFromS3()` (principal + complementario), caché IndexedDB, validación/saneamiento, cruce `joinAdditional()`, estados de carga y error, y carga de `app.js`. |
-| `app.js` | Lógica de la SPA: tokens JS, dominio (SEUROP, IQ-Col), agregación, ECharts, filtros globales, vistas y router. |
+| `app.js` | Lógica de la SPA: tokens JS, dominio (SEUROP, IQ-Col, rango de peso), agregación, ECharts, filtros globales, vistas (Inicio, Despacho, Scores) y router. |
 | `api/canales.js` | Vercel Function (Node.js): resuelve el archivo o prefijo en S3 y devuelve URLs firmadas. |
 | `package.json` | Dependencias de la Function (`@aws-sdk/*`, OIDC de Vercel). El front no necesita instalación. |
 | `PROJECT_CONTEXT.md` | Este documento. |
@@ -122,7 +122,7 @@ Los mensajes avanzan por etapas: "Cargando información del sistema..." → "Obt
 |---|---|
 | `#inicio` | KPIs, distribución SEUROP, **Ranking por granja** (paginado de 10 en 10, con posición `#`, CV Peso y columnas fijas en móvil), Distribución SEUROP y evolución de variables físicas, ambas con **selector de Eje X** (tiempo / granja). |
 | `#despacho` | Dispersión peso vs. % magro por clase SEUROP y detalle paginado de canales. |
-| `#scores` | En construcción ("Próximamente"). La versión anterior está en el commit `7859625`. |
+| `#scores` | **Rendimiento Canal** (barras + doble línea) y **Tiempos en Planta** (Gantt apilado), sobre los datos del complementario. Ver [§2.1](#21-vista-scores). |
 
 Los filtros del header (planta, granja, fechas y granularidad) viven en `App.filters`; cada vista se suscribe y se recalcula en tiempo real sobre los registros cargados desde S3.
 
@@ -175,7 +175,69 @@ Cada tarjeta tiene en su cabecera un control segmentado `Por tiempo · Por granj
 - `MultiSelect`: lista plana con búsqueda (sin agrupación).
 - `DateRange`: atajo + desde → hasta.
 - `DataTable`: orden, paginación y hover sincronizable. Por columna acepta `headClass` y `cellClass(row, i)` (clases extra, p. ej. columnas fijas); por tabla, `striped`. También tiene `setSort(key, dir)`.
-- `Tooltip`: un único globo con posición fija en `<body>` para cualquier elemento con `[data-tip]` (hover o foco; `Esc` lo cierra). Al estar fuera de la tabla, `overflow` no lo recorta. Estilos `.info-tip` y `.tip-bubble` en `index.html`.
+- `Tooltip`: módulo sin API pública (se activa solo al cargar): un único globo con posición fija en `<body>` para cualquier elemento con `[data-tip]` (hover o foco; `Esc` lo cierra). Al estar fuera de la tabla, `overflow` no lo recorta. Estilos `.info-tip` y `.tip-bubble` en `index.html`.
+- Selector **pill** (`.pill-select` en `index.html`, `rounded-[20px] border border-line bg-surface`): control segmentado de las cabeceras de tarjeta de Scores; el botón activo usa `aria-pressed="true"` y admite `disabled`.
+
+---
+
+## 2.1 Vista Scores
+
+La pestaña **Scores** está reactivada (ruta `#scores`, vista `App.views.scores` en `app.js`; la versión anterior de Score Cosecha/Granja, commit `7859625`, no se retomó). Reacciona a **todos** los filtros globales, incluida la granularidad (`Día … Año`), y se recalcula al volver a mostrarse si hubo cambios mientras estaba oculta. Al entrar a la pestaña (`onShow`) y al redimensionar (`ResizeObserver` de cada gráfico) se ejecuta `chart.resize()`. Si los filtros dejan sin registros de proceso, ambas tarjetas muestran el estado vacío *"Sin registros de proceso para los filtros seleccionados"* (`App.charts.setEmpty`).
+
+### Rango de peso del canal (`App.utils.getClasePesoCanal(peso)`)
+
+| Peso (kg) | Clase | Peso (kg) | Clase |
+|---|---|---|---|
+| `< 60` | `1.Bajo` | `> 90 y ≤ 100` | `5.>90<=100kg` |
+| `≥ 60 y ≤ 70` | `2.60<=70kg` | `> 100 y ≤ 110` | `6.>100<=110kg` |
+| `> 70 y ≤ 80` | `3.>70<=80kg` | `> 110 y ≤ 120` | `7.>110<=120kg` |
+| `> 80 y ≤ 90` | `4.>80<=90kg` | `> 120` | `8.Alto` |
+
+Nulo o no numérico → `Sin dato`. Las claves empiezan por su número, así que al ordenar de forma ascendente quedan de `1.Bajo` a `8.Alto`. (No confundir con `clasePesoCanal` de `App.utils`, que usa las claves del JSON de cuartiles para el IQ-Col.)
+
+### Desduplicación por lote/turno (regla crítica)
+
+Los pesos y marcas de tiempo del complementario son **totales por lote** (por fecha + turno en Efege) y llegan repetidos en cada canal (§3). Al agrupar por cualquier dimensión, `groupLots()` conserva **un solo registro por lote dentro de cada grupo** antes de sumar pesos o promediar horas:
+
+| Planta | Llave de lote |
+|---|---|
+| `Efege` | `planta ∣ fecha ∣ turno` (turno = últimos 3 caracteres de `id_lote`) |
+| Las demás | `planta ∣ id_lote` |
+
+Un canal sin `id_lote` se omite (sin lote no hay cruce, así que no tiene datos de proceso). La desduplicación es por grupo: un lote que cruza dos periodos cuenta una vez en cada uno y, con *Rango de peso*, una vez en cada rango en que tenga canales (el total del lote no se reparte entre rangos).
+
+### Rendimiento Canal
+
+Barras + líneas con doble eje Y (ECharts) y selector pill **Agrupar por: Tiempo · Granja · Planta · Rango de peso** (Tiempo usa la granularidad del header; Granja ordena por número de lotes y activa `dataZoom` desde el inicio). Leyenda interactiva; tooltip con kg con separador de miles (`1.234 kg`) y porcentajes con 2 decimales (`83,50%`).
+
+| Serie | Eje | Cálculo sobre los lotes únicos del grupo |
+|---|---|---|
+| Peso Canal Caliente (barra, `--color-primary`) | kg (izq.) | Σ `peso_canal_caliente` |
+| Peso Canal Frío (barra, `--color-primary-soft` con borde `--color-primary`) | kg (izq.) | Σ `peso_canal_frio` |
+| % Rto. Caliente (línea) | % (der.) | `Σ peso_canal_caliente / Σ peso_pie × 100`, solo lotes con **ambos > 0** |
+| % Rto. Frío (línea) | % (der.) | `Σ peso_canal_frio / Σ peso_pie × 100`, solo lotes con `peso_canal_frio > 0` y `peso_pie > 0` |
+
+El denominador del % frío suma únicamente el `peso_pie` de los lotes que sí tienen frío, para no distorsionar el porcentaje cuando `peso_canal_frio` viene vacío. Si el denominador es 0 el punto queda vacío (`null`). Los grupos sin ningún peso caliente ni frío (periodos anteriores al inicio del complementario, plantas que no están en él) no se grafican.
+
+### Tiempos en Planta (Gantt horizontal apilado)
+
+**Horas por fase** (`(fin − inicio) / 3 600 000`, con las marcas leídas en UTC; `null` si falta una fecha o el resultado es negativo):
+
+| Fase | Fórmula | Color |
+|---|---|---|
+| Espera | `fecha_pesaje_pie − fecha_ingreso_planta` | `#c9821f` |
+| Reposo | `fecha_sacrificio − fecha_pesaje_pie` | `#993935` |
+| Proceso | `fecha_peso_canal_caliente − fecha_sacrificio` | `#eb5852` |
+| Frío | `fecha_peso_canal_frio − fecha_peso_canal_caliente` | `#2f8f6b` |
+
+**Composición por planta:** `Efege` → Espera + Reposo · `Supercerdo Paisa` → Reposo + Proceso + Frío. `Progresar` queda fuera (no registra marcas de tiempo). Las plantas se identifican por nombre normalizado (`efege`; `supercerdo*`, ya que en los datos puede venir como `Supercerdo Paisa S.A.S`).
+
+**Controles:** pill de planta (`Efege` / `Supercerdo Paisa`; se deshabilita al agrupar por Planta) y pill de agrupación:
+
+- **Últimos 15 lotes** (por defecto): lotes únicos de la planta elegida con Reposo no nulo, ordenados por `fecha_sacrificio` de más reciente a más antigua; se toman 15 y se invierten (más antiguo arriba, más reciente abajo). Etiqueta del eje Y: `dd/mm · Com. {turno}` (Efege) o `dd/mm · Lote {id_lote}` (Supercerdo).
+- **Tiempo / Granja / Planta / Rango de peso:** promedio de horas por fase de los lotes únicos de cada categoría (cada fase promedia solo los lotes donde no es `null`). Planta compara Efege vs. Supercerdo Paisa; las demás filtran por la planta elegida. Máximo 30 filas (Tiempo: los 30 periodos más recientes; Granja: las 30 con más lotes); el subtítulo lo indica.
+
+**Dibujo:** las barras de una fila se apilan una tras otra (una fase `null` o `0` se omite sin romper la continuidad). Cada segmento muestra sus horas con 1 decimal y coma (`12,3 h`) y **oculta** la etiqueta si mide menos de 44 px (el ancho se estima con el del contenedor, por eso el Gantt se redibuja —sin recalcular— cuando este cambia). Al final de cada fila va el total en negrita `#2a211f` (`26,4 h`), dibujado con una serie transparente auxiliar. La leyenda no es seleccionable (ocultar una fase dejaría desactualizado el total). El alto crece con el número de filas.
 
 ---
 
@@ -227,7 +289,7 @@ Se anexan a cada canal con **el nombre que traen en el Parquet** (no se renombra
 
 **Ojo: son totales por lote (o por turno en Efege), no por canal.** Cada canal recibe el mismo valor de su lote (p. ej. `peso_canal_caliente = 6614,3` kg en los miles de canales de un lote de Progresar); sumarlos por canal multiplicaría el peso. Úsalos como atributo del lote o toma un valor por lote antes de agregar.
 
-Ninguno es obligatorio y ninguna vista los usa todavía; solo `fecha_ingreso_planta` y `fecha_sacrificio` alimentan `tiempo_espera_sacrificio_*`, que se calcula **después** del cruce (ver §1).
+Ninguno es obligatorio. Los consume la vista **Scores** ([§2.1](#21-vista-scores)): pesos para el rendimiento en caliente/frío y marcas de tiempo para el Gantt. Además, `fecha_ingreso_planta` y `fecha_sacrificio` alimentan `tiempo_espera_sacrificio_*`, que se calcula **después** del cruce (ver §1).
 
 ### Reglas de saneamiento (`data_loader.js → sanitizeRecords`)
 

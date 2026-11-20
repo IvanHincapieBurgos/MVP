@@ -9,7 +9,7 @@
  *   4. App.charts      Helpers de ECharts (instancias, tooltip, zoom, vacío)
  *   5. App.components  MultiSelect · DateRange · DataTable
  *   6. App.filters     Estado global de filtros (fuente única) + suscripción
- *   7. App.views       Tablero a la medida · Despacho · Scores (en construcción)
+ *   7. App.views       Tablero a la medida · Despacho · Scores
  *   8. Shell + Router  Barra superior de filtros, sidebar y navegación por hash
  *
  * Requiere: window.DASHBOARD_DATA (lo publica data_loader.js tras descargar y
@@ -137,6 +137,22 @@ App.utils = (function () {
     return pesoNorm * IQ_PESO_PONDERACION + magroNorm * IQ_MAGRO_PONDERACION;
   }
 
+  /** Rangos de peso del canal para agrupar (Scores), de menor a mayor; la clave empieza por su orden. */
+  const CLASES_PESO_CANAL = ['1.Bajo', '2.60<=70kg', '3.>70<=80kg', '4.>80<=90kg', '5.>90<=100kg', '6.>100<=110kg', '7.>110<=120kg', '8.Alto'];
+  const SIN_CLASE_PESO = 'Sin dato';
+
+  function getClasePesoCanal(pesoKg) {
+    if (typeof pesoKg !== 'number' || !Number.isFinite(pesoKg)) return SIN_CLASE_PESO;
+    if (pesoKg < 60) return CLASES_PESO_CANAL[0];
+    if (pesoKg <= 70) return CLASES_PESO_CANAL[1];
+    if (pesoKg <= 80) return CLASES_PESO_CANAL[2];
+    if (pesoKg <= 90) return CLASES_PESO_CANAL[3];
+    if (pesoKg <= 100) return CLASES_PESO_CANAL[4];
+    if (pesoKg <= 110) return CLASES_PESO_CANAL[5];
+    if (pesoKg <= 120) return CLASES_PESO_CANAL[6];
+    return CLASES_PESO_CANAL[7];
+  }
+
   const GRANULARIDADES = [
     { key: 'dia', label: 'Día' },
     { key: 'semana', label: 'Semana' },
@@ -172,6 +188,16 @@ App.utils = (function () {
   function formatDate(s) {
     const [y, m, d] = s.split('-');
     return `${d} ${MESES[+m - 1].toLowerCase()} ${y}`;
+  }
+
+  /**
+   * 'YYYY-MM-DD HH:mm:ss' → epoch-ms (UTC) o null. Se usa UTC para que la resta
+   * entre dos marcas no dependa de la zona horaria ni de cambios de hora del equipo.
+   */
+  function parseTimestamp(s) {
+    if (typeof s !== 'string') return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(s);
+    return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)) : null;
   }
 
   /** Semana ISO-8601 (inicia el lunes; el año ISO puede diferir del calendario). */
@@ -241,8 +267,8 @@ App.utils = (function () {
   }
 
   return {
-    SEUROP, iqColIndex, calcIqCol, GRANULARIDADES, granLabel,
-    fmt, fmtPct, fmtId, addDays, formatDate, periodKeys, periodLabel,
+    SEUROP, iqColIndex, calcIqCol, GRANULARIDADES, granLabel, getClasePesoCanal,
+    fmt, fmtPct, fmtId, addDays, formatDate, parseTimestamp, periodKeys, periodLabel,
     escapeHtml, seuropBadge, icons, argmax,
   };
 })();
@@ -1017,7 +1043,7 @@ App.components.DataTable = class DataTable {
  *     <body>, para que no lo recorten los contenedores con scroll (tablas).
  *     <span data-tip="Texto" tabindex="0">…</span>
  * ------------------------------------------------------------------------ */
-App.components.Tooltip = (function () {
+(function () {
   'use strict';
   const bubble = document.createElement('div');
   bubble.id = 'app-tooltip';
@@ -1067,8 +1093,6 @@ App.components.Tooltip = (function () {
   window.addEventListener('scroll', place, true);
   window.addEventListener('resize', place);
   document.addEventListener('keydown', (e) => e.key === 'Escape' && hide());
-
-  return { hide };
 })();
 
 /* ==========================================================================
@@ -1526,7 +1550,7 @@ App.views.inicio = (function () {
       { key: 'grasaProm', label: 'Promedio grasa dorsal (mm)', align: 'right', render: (r) => U.fmt(r.grasaProm, 1) },
       {
         key: 'iqProm',
-        // Icono de ayuda: muestra el globo (App.components.Tooltip) y no reordena la columna
+        // Icono de ayuda: muestra el globo (módulo Tooltip, 5.4) y no reordena la columna
         label: `IQ-Col promedio<span class="info-tip" tabindex="0" data-no-sort data-tip="${IQ_TIP}" aria-label="Qué es el IQ-Col promedio">${INFO_SVG}</span>`,
         align: 'right',
         render: (r) => U.fmt(r.iqProm, 1),
@@ -1977,30 +2001,561 @@ App.views.despacho = (function () {
 })();
 
 /* --------------------------------------------------------------------------
- * 7.3 SCORES — en construcción. La versión anterior (Score Cosecha + Score
- *     Granja) está en el historial de git (commit 7859625) para retomarla
- *     cuando el módulo se integre con los datos de S3.
+ * 7.3 SCORES — usa los filtros globales (fechas, planta, granja, granularidad)
+ *     sobre los datos del complementario (additional_data_cipa.parquet):
+ *       · Rendimiento Canal: barras (kg caliente / frío) + líneas (% Rto.)
+ *       · Tiempos en Planta: Gantt horizontal apilado (Espera · Reposo · Proceso · Frío)
+ *     Los valores del complementario son TOTALES POR LOTE (por fecha + turno en
+ *     Efege): cada canal trae el mismo valor de su lote. Antes de sumar o
+ *     promediar se toma UN registro por lote dentro de cada grupo (`groupLots`).
  * ------------------------------------------------------------------------ */
 App.views.scores = (function () {
   'use strict';
+  const T = App.tokens;
+  const U = App.utils;
+  const C = App.charts;
+  const F = App.filters;
+
+  const EMPTY_MSG = 'Sin registros de proceso para los filtros seleccionados';
+  const byText = new Intl.Collator('es', { sensitivity: 'base', numeric: true }).compare;
+
+  // Variable de agrupación (sin "Comercializador": queda para la siguiente iteración)
+  const DIMS = [
+    { key: 'tiempo', label: 'Tiempo' },
+    { key: 'granja', label: 'Granja' },
+    { key: 'planta', label: 'Planta' },
+    { key: 'rango', label: 'Rango de peso' },
+  ];
+  const dimLabel = (key) => (DIMS.find((d) => d.key === key) || {}).label || key;
+
+  const GANTT_LAST = 15; // lotes/turnos del modo por defecto
+  const GANTT_MAX_GROUPS = 30; // filas máximas del modo agrupado (el Gantt crece en alto con cada fila)
+  const GANTT_PLANTAS = ['Efege', 'Supercerdo Paisa']; // Progresar no registra marcas de tiempo
+  const GANTT_ROW_H = 34;
+  const GANTT_LABEL_W = 150; // ancho reservado a las etiquetas del eje Y
+  const GANTT_TOTAL_W = 80; // margen derecho para el total de horas
+  const MIN_LABEL_PX = 44; // por debajo de este ancho de segmento no se rotula
+
+  // Fases del proceso: horas = (fin − inicio) / 3 600 000
+  const PHASES = [
+    { key: 'espera', label: 'Espera', color: T.warn, from: 'fecha_ingreso_planta', to: 'fecha_pesaje_pie' },
+    { key: 'reposo', label: 'Reposo', color: T.primary, from: 'fecha_pesaje_pie', to: 'fecha_sacrificio' },
+    { key: 'proceso', label: 'Proceso', color: T.accent, from: 'fecha_sacrificio', to: 'fecha_peso_canal_caliente' },
+    { key: 'frio', label: 'Frío', color: T.good, from: 'fecha_peso_canal_caliente', to: 'fecha_peso_canal_frio' },
+  ];
+  const PHASES_BY_PLANTA = { Efege: ['espera', 'reposo'], 'Supercerdo Paisa': ['reposo', 'proceso', 'frio'] };
+
+  const RTO = {
+    cal: { name: 'Peso Canal Caliente', color: T.primary },
+    fr: { name: 'Peso Canal Frío', color: T.primarySoft },
+    rtoCal: { name: '% Rto. Caliente', color: T.warn },
+    rtoFr: { name: '% Rto. Frío', color: T.good },
+  };
+
+  // Estado propio de la vista (solo visual); los filtros viven en App.filters
+  const state = { rend: { dim: 'tiempo' }, gantt: { dim: 'lotes', planta: 'Efege' } };
+  let dirty = false;
+  let lastGantt = null; // vista calculada del Gantt: redibujar al cambiar el ancho no recalcula
+  let ganttWidth = 0;
+
+  const ui = {};
+  const charts = {};
+
+  /* ---------- Plantilla ---------------------------------------------------- */
+
+  const pill = (name, label, options) => `
+    <div class="flex items-center gap-2">
+      <span class="text-[0.72rem] font-semibold text-grey-mid">${label}</span>
+      <div class="pill-select" role="group" aria-label="${label}" data-pill="${name}">
+        ${options.map((o) => `<button type="button" data-value="${o.key}" aria-pressed="false">${o.label}</button>`).join('')}
+      </div>
+    </div>`;
+
+  const cardHead = (title, subRef, controls) => `
+    <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h2 class="card-title">${title}</h2>
+        <p class="card-subtitle" data-ref="${subRef}"></p>
+      </div>
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">${controls}</div>
+    </div>`;
 
   function template() {
     return `
-      <div class="mx-auto mt-6 max-w-lg rounded-[18px] border border-line bg-white p-8 text-center shadow-card">
-        <span class="inline-block rounded-full bg-warn-soft px-3 py-1 text-xs font-bold uppercase text-warn">Próximamente</span>
-        <span class="mx-auto mt-6 grid h-14 w-14 place-items-center rounded-2xl bg-primary-soft text-primary">
-          <i data-lucide="construction" class="h-7 w-7"></i>
-        </span>
-        <h2 class="mt-5 font-display text-xl font-extrabold tracking-tight text-ink">Módulo de Scores</h2>
-        <p class="mt-2 text-sm leading-relaxed text-grey-strong">
-          Esta sección se encuentra actualmente en fase de integración y estará disponible en una próxima versión.
-        </p>
-      </div>`;
+      <section class="mb-6 rounded-[18px] border border-line bg-white p-5 shadow-card">
+        ${cardHead('Rendimiento Canal', 'rendSub', pill('rend', 'Agrupar por:', DIMS))}
+        <div data-ref="chartRend" style="height:400px"></div>
+      </section>
+
+      <section class="rounded-[18px] border border-line bg-white p-5 shadow-card">
+        ${cardHead(
+          'Tiempos en Planta',
+          'ganttSub',
+          pill('planta', 'Planta:', GANTT_PLANTAS.map((p) => ({ key: p, label: p }))) +
+            pill('gantt', 'Agrupar por:', [{ key: 'lotes', label: `Últimos ${GANTT_LAST} lotes` }, ...DIMS])
+        )}
+        <div data-ref="chartGantt" style="height:420px"></div>
+      </section>`;
+  }
+
+  /* ---------- Lotes únicos ------------------------------------------------- */
+
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+
+  /**
+   * Llave del lote: planta|fecha|turno en Efege (turno = últimos 3 dígitos de
+   * id_lote) y planta|lote en el resto. null si el canal no tiene lote (sin
+   * lote no hay cruce con el complementario, así que no aporta datos de proceso).
+   */
+  function loteKey(r) {
+    if (r.id_lote == null || r.id_lote === '') return null;
+    if (norm(r.planta) === 'efege') return `${r.planta}|${r.fecha}|${String(r.id_lote).slice(-3)}`;
+    return `${r.planta}|${r.id_lote}`;
+  }
+
+  /** Grupo → (llave de lote → primer registro del lote en ese grupo). */
+  function groupLots(rows, groupOf) {
+    const groups = new Map();
+    for (const r of rows) {
+      const lk = loteKey(r);
+      if (lk === null) continue;
+      const g = groupOf(r);
+      if (g == null) continue;
+      let lots = groups.get(g);
+      if (!lots) groups.set(g, (lots = new Map()));
+      if (!lots.has(lk)) lots.set(lk, r);
+    }
+    return groups;
+  }
+
+  function groupOf(dim) {
+    switch (dim) {
+      case 'tiempo': {
+        const field = '_' + F.state.gran;
+        return (r) => r[field];
+      }
+      case 'granja':
+        return (r) => r.granja;
+      case 'planta':
+        return (r) => r.planta;
+      default:
+        return (r) => U.getClasePesoCanal(r.peso_kg);
+    }
+  }
+
+  /** Ordena y rotula los grupos: tiempo y rango cronológico/ascendente, granja por volumen, planta alfabético. */
+  function sortGroups(dim, items) {
+    if (dim === 'granja') items.sort((a, b) => b.n - a.n || byText(a.key, b.key));
+    else if (dim === 'planta') items.sort((a, b) => byText(a.key, b.key));
+    else items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const gran = F.state.gran;
+    items.forEach((it) => (it.label = dim === 'tiempo' ? U.periodLabel(gran, it.key) : it.key));
+    return items;
+  }
+
+  /* ---------- Rendimiento Canal -------------------------------------------- */
+
+  /**
+   * Métricas de un grupo a partir de sus lotes únicos.
+   *  % Rto. caliente = Σ caliente / Σ pie, solo lotes con ambos > 0
+   *  % Rto. frío     = Σ frío / Σ pie, solo lotes con frío > 0 y pie > 0
+   * (un lote sin pie o sin frío no entra ni al numerador ni al denominador).
+   */
+  function rendimiento(lots) {
+    let cal = 0, fr = 0, calNum = 0, calDen = 0, frNum = 0, frDen = 0;
+    for (const r of lots.values()) {
+      const c = r.peso_canal_caliente;
+      const f = r.peso_canal_frio;
+      const p = r.peso_pie;
+      if (c > 0) cal += c;
+      if (f > 0) fr += f;
+      if (c > 0 && p > 0) {
+        calNum += c;
+        calDen += p;
+      }
+      if (f > 0 && p > 0) {
+        frNum += f;
+        frDen += p;
+      }
+    }
+    return { n: lots.size, cal, fr, rtoCal: calDen ? (calNum / calDen) * 100 : null, rtoFr: frDen ? (frNum / frDen) * 100 : null };
+  }
+
+  function renderRendimiento(rows) {
+    const dim = state.rend.dim;
+    const gran = F.state.gran;
+    ui.rendSub.textContent =
+      `Peso por lote único en barras (eje izquierdo) · % de rendimiento sobre el peso en pie en líneas (eje derecho) · ` +
+      (dim === 'tiempo' ? `por ${U.granLabel(gran).toLowerCase()}` : `por ${dimLabel(dim).toLowerCase()}`);
+
+    const items = [];
+    for (const [key, lots] of groupLots(rows, groupOf(dim))) {
+      const m = rendimiento(lots);
+      if (m.cal > 0 || m.fr > 0) items.push({ key, ...m });
+    }
+    if (!items.length) return C.setEmpty(charts.rend, EMPTY_MSG);
+    sortGroups(dim, items);
+
+    const byGranja = dim === 'granja';
+    const labels = items.map((i) => i.label);
+    const axis = C.categoryAxis(labels);
+    if (byGranja) axis.axisLabel = { ...axis.axisLabel, interval: 0, rotate: 35, width: 110, overflow: 'truncate', hideOverlap: false };
+    const zoom = byGranja ? C.zoomFor(items.length, Math.max(6, Math.floor(ui.chartRend.clientWidth / 56)), true) : C.zoomFor(items.length);
+
+    const bar = (key, field, extra) => ({
+      name: RTO[key].name,
+      type: 'bar',
+      yAxisIndex: 0,
+      barMaxWidth: 30,
+      emphasis: { focus: 'series' },
+      data: items.map((i) => Math.round(i[field])),
+      ...extra,
+    });
+    const line = (key, field) => ({
+      name: RTO[key].name,
+      type: 'line',
+      yAxisIndex: 1,
+      smooth: 0.25,
+      symbol: 'circle',
+      symbolSize: 7,
+      showSymbol: items.length <= 60,
+      lineStyle: { width: 2.5 },
+      itemStyle: { color: RTO[key].color, borderColor: '#fff', borderWidth: 1.5 },
+      emphasis: { focus: 'series' },
+      data: items.map((i) => (i[field] === null ? null : +i[field].toFixed(2))),
+    });
+
+    charts.rend.setOption(
+      {
+        textStyle: C.textStyle,
+        animationDuration: 450,
+        legend: { ...C.legend, data: Object.values(RTO).map((s) => s.name) },
+        grid: { left: byGranja ? 40 : 4, right: 4, top: 58, bottom: zoom ? 44 : 4, containLabel: true },
+        tooltip: {
+          ...C.tooltip,
+          trigger: 'axis',
+          axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(153,57,53,.06)' } },
+          formatter: (params) => {
+            const i = params[0].dataIndex;
+            let html = C.tipHeader(labels[i], `${U.fmt(items[i].n)} lotes`);
+            params.forEach((p) => {
+              const s = Object.values(RTO).find((x) => x.name === p.seriesName);
+              const isPct = p.seriesName.startsWith('%');
+              const v = typeof p.value === 'number' ? (isPct ? U.fmtPct(p.value, 2) : `${U.fmt(p.value)} kg`) : '—';
+              html += C.tipRow(s.color === T.primarySoft ? T.primary : s.color, p.seriesName, v);
+            });
+            return html;
+          },
+        },
+        xAxis: axis,
+        yAxis: [
+          {
+            type: 'value',
+            name: 'Peso (kg)',
+            nameTextStyle: { color: C.AXIS.name, align: 'left', fontWeight: 600 },
+            min: 0,
+            axisLabel: { color: C.AXIS.label, formatter: (v) => U.fmt(v) },
+            splitLine: { lineStyle: { color: C.AXIS.split } },
+          },
+          {
+            type: 'value',
+            name: 'Rendimiento (%)',
+            nameTextStyle: { color: C.AXIS.name, align: 'right', fontWeight: 600 },
+            position: 'right',
+            // Eje ajustado al rango para que la variación del % sea legible (nunca pasa de 100)
+            min: (v) => (Number.isFinite(v.min) ? Math.max(0, Math.floor((v.min - 5) / 5) * 5) : 0),
+            max: (v) => (Number.isFinite(v.max) ? Math.min(100, Math.ceil((v.max + 2) / 5) * 5) : 100),
+            axisLabel: { color: C.AXIS.label, formatter: '{value}%' },
+            splitLine: { show: false },
+          },
+        ],
+        dataZoom: zoom || [],
+        series: [
+          bar('cal', 'cal', { itemStyle: { color: RTO.cal.color, borderRadius: [5, 5, 0, 0] } }),
+          bar('fr', 'fr', { itemStyle: { color: RTO.fr.color, borderColor: T.primary, borderWidth: 1.5, borderRadius: [5, 5, 0, 0] } }),
+          line('rtoCal', 'rtoCal'),
+          line('rtoFr', 'rtoFr'),
+        ],
+      },
+      true
+    );
+  }
+
+  /* ---------- Tiempos en Planta (Gantt) ------------------------------------ */
+
+  /** Planta del Gantt: Efege o Supercerdo Paisa (el nombre en los datos puede traer sufijo, p. ej. "S.A.S"). */
+  function ganttPlanta(r) {
+    const p = norm(r.planta);
+    if (p === 'efege') return 'Efege';
+    return p.startsWith('supercerdo') ? 'Supercerdo Paisa' : null;
+  }
+
+  /** Horas de cada fase de un lote; null si falta una de las dos fechas o el resultado es negativo. */
+  function phaseHours(r) {
+    const h = {};
+    for (const p of PHASES) {
+      const a = U.parseTimestamp(r[p.from]);
+      const b = U.parseTimestamp(r[p.to]);
+      const v = a === null || b === null ? null : (b - a) / 3600000;
+      h[p.key] = v !== null && v >= 0 ? v : null;
+    }
+    return h;
+  }
+
+  const sumHours = (h, comp) => comp.reduce((s, k) => s + (h[k] > 0 ? h[k] : 0), 0);
+
+  /** Últimos 15 lotes/turnos de la planta con Reposo, el más antiguo arriba y el más reciente abajo. */
+  function ganttLast(rows, planta) {
+    const comp = PHASES_BY_PLANTA[planta];
+    const seen = new Set();
+    const lots = [];
+    for (const r of rows) {
+      if (ganttPlanta(r) !== planta) continue;
+      const lk = loteKey(r);
+      if (lk === null || seen.has(lk)) continue;
+      const h = phaseHours(r);
+      const ts = U.parseTimestamp(r.fecha_sacrificio);
+      if (h.reposo === null || ts === null) continue;
+      seen.add(lk);
+      lots.push({ r, h, ts });
+    }
+    lots.sort((a, b) => b.ts - a.ts);
+    return lots
+      .slice(0, GANTT_LAST)
+      .reverse()
+      .map(({ r, h }) => {
+        const fecha = `${r.fecha_sacrificio.slice(8, 10)}/${r.fecha_sacrificio.slice(5, 7)}`;
+        const id = planta === 'Efege' ? `Com. ${String(r.id_lote).slice(-3)}` : `Lote ${r.id_lote}`;
+        return { label: `${fecha} · ${id}`, h, comp, n: 1, total: sumHours(h, comp) };
+      });
+  }
+
+  /** Promedio de horas por fase sobre los lotes únicos de cada grupo. */
+  function ganttGrouped(rows, dim, planta) {
+    const byPlanta = dim === 'planta';
+    const scoped = byPlanta ? rows : rows.filter((r) => ganttPlanta(r) === planta);
+    const items = [];
+    for (const [key, lots] of groupLots(scoped, byPlanta ? ganttPlanta : groupOf(dim))) {
+      const comp = PHASES_BY_PLANTA[byPlanta ? key : planta];
+      const sum = {};
+      const cnt = {};
+      for (const r of lots.values()) {
+        const h = phaseHours(r);
+        for (const k of comp) {
+          if (h[k] === null) continue;
+          sum[k] = (sum[k] || 0) + h[k];
+          cnt[k] = (cnt[k] || 0) + 1;
+        }
+      }
+      const h = {};
+      for (const k of comp) h[k] = cnt[k] ? sum[k] / cnt[k] : null;
+      const total = sumHours(h, comp);
+      if (total > 0) items.push({ key, h, comp, n: lots.size, total });
+    }
+    sortGroups(dim, items);
+    if (items.length <= GANTT_MAX_GROUPS) return { items, truncated: false };
+    // Tiempo: los periodos más recientes · Granja: las de mayor volumen (ya vienen ordenadas así)
+    return { items: dim === 'granja' ? items.slice(0, GANTT_MAX_GROUPS) : items.slice(-GANTT_MAX_GROUPS), truncated: true };
+  }
+
+  function computeGantt(rows) {
+    const { dim, planta } = state.gantt;
+    const { items, truncated } = dim === 'lotes' ? { items: ganttLast(rows, planta), truncated: false } : ganttGrouped(rows, dim, planta);
+    let sub;
+    if (dim === 'lotes') {
+      sub = `${planta} · últimos ${GANTT_LAST} lotes/turnos por fecha de sacrificio (el más reciente abajo) · horas por fase`;
+    } else {
+      const gran = dim === 'tiempo' ? ` por ${U.granLabel(F.state.gran).toLowerCase()}` : ` por ${dimLabel(dim).toLowerCase()}`;
+      sub = `${dim === 'planta' ? 'Efege vs. Supercerdo Paisa' : planta} · promedio de horas por fase de los lotes únicos${gran}`;
+      if (truncated) sub += dim === 'granja' ? ` · ${GANTT_MAX_GROUPS} granjas con más lotes` : ` · últimos ${GANTT_MAX_GROUPS} periodos`;
+    }
+    return { items, sub };
+  }
+
+  function drawGantt() {
+    const view = lastGantt;
+    if (!view) return;
+    ui.ganttSub.textContent = view.sub;
+    const { items } = view;
+    const el = ui.chartGantt;
+    el.style.height = `${items.length ? Math.max(240, items.length * GANTT_ROW_H + 90) : 260}px`;
+    charts.gantt.resize();
+    ganttWidth = el.clientWidth;
+    if (!items.length) return C.setEmpty(charts.gantt, EMPTY_MSG);
+
+    // Solo las fases que aparecen en alguna fila (Efege: Espera + Reposo · Supercerdo: Reposo + Proceso + Frío)
+    const phases = PHASES.filter((p) => items.some((it) => it.comp.includes(p.key)));
+    const maxTotal = Math.max(...items.map((it) => it.total));
+    const xMax = Math.max(1, Math.ceil(maxTotal / 5) * 5);
+    // Ancho estimado del área de barras para ocultar rótulos de segmentos estrechos
+    const pxPerHour = Math.max(100, el.clientWidth - GANTT_LABEL_W - GANTT_TOTAL_W - 8) / xMax;
+    const barWidth = 20;
+
+    const segment = (p) => ({
+      name: p.label,
+      type: 'bar',
+      stack: 'horas',
+      barWidth,
+      barGap: '-100%',
+      itemStyle: { color: p.color, borderColor: '#fff', borderWidth: 1 },
+      label: {
+        show: true,
+        position: 'inside',
+        color: '#fff',
+        fontWeight: 700,
+        fontSize: 11,
+        formatter: (d) => (d.value * pxPerHour >= MIN_LABEL_PX ? `${U.fmt(d.value, 1)} h` : ''),
+      },
+      emphasis: { focus: 'series' },
+      data: items.map((it) => (it.comp.includes(p.key) && it.h[p.key] > 0 ? it.h[p.key] : null)),
+    });
+
+    charts.gantt.setOption(
+      {
+        textStyle: C.textStyle,
+        animationDuration: 450,
+        // Sin selección: ocultar una fase dejaría el total de la derecha desactualizado
+        legend: { ...C.legend, selectedMode: false, data: phases.map((p) => p.label) },
+        grid: { left: 8, right: GANTT_TOTAL_W, top: 40, bottom: 8, containLabel: true },
+        tooltip: {
+          ...C.tooltip,
+          trigger: 'axis',
+          axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(153,57,53,.06)' } },
+          formatter: (params) => {
+            const it = items[params[0].dataIndex];
+            let html = C.tipHeader(it.label, it.n > 1 ? `${U.fmt(it.n)} lotes` : '');
+            for (const p of phases) {
+              if (it.comp.includes(p.key) && it.h[p.key] > 0) html += C.tipRow(p.color, p.label, `${U.fmt(it.h[p.key], 1)} h`);
+            }
+            return html + C.tipRow(T.greyLight, 'Total', `${U.fmt(it.total, 1)} h`);
+          },
+        },
+        // Categorías por posición: dos lotes pueden compartir etiqueta
+        yAxis: {
+          type: 'category',
+          inverse: true, // la primera fila arriba
+          data: items.map((_, i) => String(i)),
+          axisTick: { show: false },
+          axisLine: { lineStyle: { color: C.AXIS.line } },
+          axisLabel: {
+            color: T.ink,
+            fontWeight: 600,
+            width: GANTT_LABEL_W,
+            overflow: 'truncate',
+            formatter: (v) => items[+v].label,
+          },
+        },
+        xAxis: {
+          type: 'value',
+          min: 0,
+          max: xMax,
+          axisLabel: { color: C.AXIS.label, formatter: '{value} h' },
+          splitLine: { lineStyle: { color: C.AXIS.split } },
+        },
+        series: [
+          ...phases.map(segment),
+          // Serie invisible solo para rotular el total al final de cada barra
+          {
+            name: 'Total',
+            type: 'bar',
+            barWidth,
+            barGap: '-100%',
+            silent: true,
+            itemStyle: { color: 'transparent' },
+            label: {
+              show: true,
+              position: 'right',
+              color: T.ink,
+              fontWeight: 700,
+              fontSize: 12,
+              formatter: (d) => `${U.fmt(d.value, 1)} h`,
+            },
+            data: items.map((it) => it.total),
+          },
+        ],
+      },
+      true
+    );
+  }
+
+  function renderGantt(rows) {
+    lastGantt = computeGantt(rows);
+    drawGantt();
+  }
+
+  /* ---------- Selectores pill ---------------------------------------------- */
+
+  function syncPills() {
+    const active = { rend: state.rend.dim, planta: state.gantt.planta, gantt: state.gantt.dim };
+    const porPlanta = state.gantt.dim === 'planta'; // compara ambas plantas: el selector de planta no aplica
+    ui.root.querySelectorAll('[data-pill]').forEach((group) => {
+      const name = group.dataset.pill;
+      group.querySelectorAll('button').forEach((b) => {
+        b.setAttribute('aria-pressed', String(b.dataset.value === active[name]));
+        if (name === 'planta') b.disabled = porPlanta;
+      });
+    });
+  }
+
+  /* ---------- Montaje ------------------------------------------------------ */
+
+  function update() {
+    dirty = false;
+    const rows = F.rows();
+    renderRendimiento(rows);
+    renderGantt(rows);
+  }
+
+  function mount(container) {
+    container.innerHTML = template();
+    ui.root = container;
+    container.querySelectorAll('[data-ref]').forEach((n) => (ui[n.dataset.ref] = n));
+
+    // Cualquier cambio de filtro (incluida la granularidad) afecta a ambas gráficas
+    F.subscribe(() => {
+      if (container.hidden) dirty = true;
+      else update();
+    });
+
+    container.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pill] button[data-value]');
+      if (!b || b.disabled) return;
+      const name = b.parentElement.dataset.pill;
+      const value = b.dataset.value;
+      if (name === 'rend') {
+        if (state.rend.dim === value) return;
+        state.rend.dim = value;
+        syncPills();
+        renderRendimiento(F.rows());
+      } else {
+        if (state.gantt[name === 'planta' ? 'planta' : 'dim'] === value) return;
+        state.gantt[name === 'planta' ? 'planta' : 'dim'] = value;
+        syncPills();
+        renderGantt(F.rows());
+      }
+    });
+
+    charts.rend = C.create(ui.chartRend);
+    charts.gantt = C.create(ui.chartGantt);
+
+    // El rótulo de cada segmento depende del ancho: se redibuja (sin recalcular) cuando este cambia
+    if ('ResizeObserver' in window) {
+      new ResizeObserver(() => {
+        const w = ui.chartGantt.clientWidth;
+        if (w > 0 && w !== ganttWidth) drawGantt();
+      }).observe(ui.chartGantt);
+    }
+
+    syncPills();
+    update();
   }
 
   return {
-    mount(container) {
-      container.innerHTML = template();
+    mount,
+    onShow() {
+      if (dirty) update();
+      Object.values(charts).forEach((c) => c.resize());
+      if (ui.chartGantt && ui.chartGantt.clientWidth !== ganttWidth) drawGantt();
     },
   };
 })();

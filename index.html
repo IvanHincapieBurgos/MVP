@@ -104,6 +104,13 @@
         .segmented button:hover { color: var(--color-ink); }
         .segmented button[aria-pressed="true"] { background: var(--color-primary); color: #fff; box-shadow: 0 1px 2px #7c2c2940; }
 
+        /* Selector tipo pill (cabeceras de tarjeta de Scores) */
+        .pill-select { display: inline-flex; gap: 2px; padding: 2px; border-radius: 20px; border: 1px solid var(--color-line); background: var(--color-surface); }
+        .pill-select button { height: 28px; padding: 0 .75rem; border-radius: 18px; font-size: .78rem; font-weight: 600; color: var(--color-grey-strong); white-space: nowrap; transition: background .15s, color .15s; }
+        .pill-select button:hover:not(:disabled) { color: var(--color-ink); }
+        .pill-select button[aria-pressed="true"] { background: var(--color-primary); color: #fff; box-shadow: 0 1px 2px #7c2c2940; }
+        .pill-select button:disabled { opacity: .4; cursor: not-allowed; }
+
         /* Desvanecido en los bordes cuando hay filtros fuera de vista (scroll horizontal sin barra) */
         .scroll-fade[data-fade="right"] { mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
         .scroll-fade[data-fade="left"] { mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent); }
