@@ -56,17 +56,22 @@ La planta del canal se compara con `trim().toLowerCase()`:
 
 | Planta del canal | Índice | Llave tomada del canal |
 |---|---|---|
-| `Efege` | `mapByFechaTurno` | `fecha` + turno (**últimos 3 dígitos de `id_lote`**) |
-| `Supercerdo Paisa S.A.S`, `Progresar` | `mapByLote` | lote (**`id_lote`**) |
+| `Efege` | `mapByFechaTurno` | `fecha` ↔ `Fecha` y turno del canal ↔ `Turno` (sin ceros a la izquierda) |
+| `Supercerdo Paisa S.A.S`, `Progresar` | `mapByLote` | `id_lote` del principal ↔ `Lote` del complementario |
 | Cualquier otra (fallback) | `mapByLote` | lote (`id_lote`); sin lote no hay cruce |
 
-**El principal no trae columnas `lote` ni `turno`**: ambos salen de `id_lote` (`loteDe()` y `turnoDe()` en `data_loader.js`; si algún día llegan columnas `lote`/`turno`, tienen prioridad). En Efege, `id_lote` es `DDMMAA` + `02` + turno de 3 dígitos (`16112602167` → 16/11/2026, turno 167; en registros antiguos es solo el turno, `"167"`), así que el turno son siempre los últimos 3 caracteres. Las demás plantas usan `id_lote` tal cual (`"55237"`).
+**Lote y turno del principal.** El principal **no** trae columna `lote`: el lote es `id_lote` tal cual (`loteDe()` en `data_loader.js`; `"55237"`). Sí trae la columna `turno`, pero solo Efege la llena y solo en parte (≈27 % de sus canales; el resto es `null`). `id_lote` **no cambia** y sigue siendo la llave de las demás plantas. Para Efege, `turnoCanal()` calcula el turno de cada canal al sanear el registro y lo deja en **`r.turno`** (texto sin ceros a la izquierda, `null` en las demás plantas):
 
-Cobertura verificada con los Parquet de producción (19/11/2026): Progresar 88,0 %, Supercerdo Paisa 62,1 %, Efege 29,8 % global (88,8 % de los canales desde 2026-01-04, que es donde empieza el complementario). Las plantas que no están en el complementario (Ble, Cavasa, Frigoporcinos Bello, etc.) cruzan 0 %, y es lo esperado: sus campos adicionales quedan en `null`.
+1. La columna `turno` del principal, si viene con valor.
+2. Si viene vacía, los **últimos 3 caracteres de `id_lote`** (en Efege `id_lote` es `DDMMAA` + `02` + turno de 3 dígitos: `16112602167` → turno 167; en registros antiguos es solo el turno, `"167"`).
 
-(Las dos últimas filas se comportan igual; solo `efege` está en el código como excepción, `PLANTAS_POR_FECHA_TURNO`.)
+Los ceros a la izquierda se omiten en ambos lados (`"041"` → `"41"`). Cuando `turno` viene lleno coincide siempre con los últimos 3 de `id_lote`; el respaldo existe porque, sin él, el cruce de Efege bajaría del 89 % al 73 % desde 2026-01-04. `app.js` (llave de lote y etiqueta `Com. {turno}` de Scores) lee `r.turno` ya normalizado.
 
-Normalización de llaves (hyparquet devuelve `Date`/string y `Number`/`BigInt`): `normalizeDate` → `YYYY-MM-DD` en UTC o `""`; `normalizeInt` → entero como texto (`"01"` y `1n` → `"1"`) o `""`; `normalizeText` → `trim().toLowerCase()` o `""`. Las columnas del complementario se buscan sin distinguir mayúsculas (`Fecha`/`fecha`, `Turno`/`turno`, `Lote`/`lote`, `Planta`/`planta`); en el principal se leen `planta`, `fecha` e `id_lote`.
+Cobertura con los Parquet de ejemplo (20/11/2026): Progresar 88,1 %, Efege 29,7 % global (89,1 % de los canales desde 2026-01-04, que es donde empieza el complementario), Supercerdo Paisa ≈ 62 %. Las plantas que no están en el complementario (Ble, Cavasa, Frigoporcinos Bello, etc.) cruzan 0 %, y es lo esperado: sus campos adicionales quedan en `null`. **Ojo con Progresar:** el complementario solo le trae `Lote`, `fecha_peso_canal_frio` y los pesos; sus demás fechas vienen vacías (ver el Gantt en §2.1).
+
+(Solo `efege` está en el código como excepción de llave, `PLANTAS_POR_FECHA_TURNO`.)
+
+Normalización de llaves (hyparquet devuelve `Date`/string y `Number`/`BigInt`): `normalizeDate` → `YYYY-MM-DD` en UTC o `""`; `normalizeInt` → entero como texto (`"01"` y `1n` → `"1"`) o `""`; `normalizeText` → `trim().toLowerCase()` o `""`. Las columnas del complementario se buscan sin distinguir mayúsculas (`Fecha`/`fecha`, `Turno`/`turno`, `Lote`/`lote`, `Planta`/`planta`); en el principal se leen `planta`, `fecha`, `id_lote` y `turno`.
 
 Reglas del merge:
 
@@ -124,13 +129,13 @@ Los mensajes avanzan por etapas: "Cargando información del sistema..." → "Obt
 | `#despacho` | Dispersión peso vs. % magro por clase SEUROP y detalle paginado de canales. |
 | `#scores` | **Rendimiento Canal** (barras + doble línea) y **Tiempos en Planta** (Gantt apilado), sobre los datos del complementario. Ver [§2.1](#21-vista-scores). |
 
-Los filtros del header (planta, granja, fechas y granularidad) viven en `App.filters`; cada vista se suscribe y se recalcula en tiempo real sobre los registros cargados desde S3.
+Los filtros del header (planta, comercializador, granja, fechas y granularidad) viven en `App.filters`; cada vista se suscribe y se recalcula en tiempo real sobre los registros cargados desde S3.
 
 ### Header: filtros en dos líneas
 
 La zona de filtros (`[data-shell="filters"]`, armada por `mountFilters()` en `app.js`) tiene dos filas, dentro del mismo contenedor con scroll horizontal (`.scroll-fade`) para pantallas angostas:
 
-1. **Filtros de datos:** Planta, Granja, Rango de fechas (atajo + desde → hasta) y el botón de restablecer.
+1. **Filtros de datos:** Planta, Comercializador, Granja, Rango de fechas (atajo + desde → hasta) y el botón de restablecer.
 2. **Agrupación temporal:** la etiqueta *"Agrupar tiempo por:"* (`text-[0.72rem] font-semibold text-grey-mid`) seguida del control segmentado `Día · Semana · Mes · Trimestre · Año`. La etiqueta deja claro que esto solo cambia cómo se agrupan los gráficos en el tiempo; no filtra datos (cambiar la granularidad no vuelve a filtrar: `App.filters.set({ gran })` no incrementa `dataVersion`).
 
 Desde 1440 px de ancho (`min-[1440px]:`) el título queda a la izquierda y el bloque de filtros a la derecha; por debajo, el título va arriba y los filtros debajo.
@@ -151,6 +156,13 @@ Una granja se identifica **solo por su nombre**. Si la misma granja entrega a tr
 - **Reactividad cruzada:** al cambiar el filtro de plantas, la lista se restringe a `granjasDePlantas(plantasSeleccionadas)` (`cascadeGranjas()` en el shell). Conserva las granjas que ya estaban marcadas y marca las que aparecen por primera vez.
 - El resumen del disparador ("Todas (N)", "k de N") cuenta granjas únicas.
 
+### Filtro de comercializadores
+
+- `MultiSelect` (etiqueta "Comercializador") en la fila 1, entre Planta y Granja. Lista plana y alfabética de los valores únicos de la columna `comercializador` del principal; **los nulos no aparecen en la lista**. Afecta a todas las vistas (Inicio, Despacho y Scores) y el botón de restablecer lo devuelve a "Todas".
+- **Reactividad cruzada (como Granja):** al cambiar las plantas, la lista se restringe a `comercializadoresDePlantas(plantas)` (`cascadeComercializadores()` en el shell), conserva las marcas previas y marca los que aparecen por primera vez. Una planta sin comercializadores deja la lista en "Sin opciones disponibles".
+- **Regla de filtrado (`comercializadorSet()` en `App.data`):** la mayoría de los canales no trae comercializador (≈94 %), así que con **todos** los comercializadores disponibles marcados (o ninguno disponible) el filtro **no restringe** y esos canales se conservan. Con una selección **parcial** solo pasan los canales de los comercializadores elegidos (los nulos quedan fuera); "Limpiar" deja 0 registros, igual que Planta y Granja.
+- `App.filters.state.comercializadores` guarda los nombres elegidos. Los nombres se muestran tal como vienen en el origen (algunos traen caracteres rotos, p. ej. "Fandi�o": es un problema del dato, no del tablero).
+
 ### Ranking por granja
 
 - **Una fila por granja única** (consolida todas sus plantas). "Cat. SEUROP" es la clase predominante (moda) de la granja y CV Peso se calcula sobre todos sus canales.
@@ -158,7 +170,7 @@ Una granja se identifica **solo por su nombre**. Si la misma granja entrega a tr
 - **Columna `#`** (primera a la izquierda, no ordenable): la posición según el orden activo (por defecto, más canales primero). Continúa entre páginas: `((paginaActual − 1) × 10) + índice + 1`, así que la página 2 va de 11 a 20. `DataTable` pasa esa posición como segundo argumento de `render(row, pos)`.
 - Al reordenar o cambiar un filtro, la tabla vuelve a la página 1 y la numeración se recalcula.
 - **Columnas fijas (móvil):** la tabla vive en `.table-scroll` (scroll horizontal). Las columnas `#` (`sticky left-0`, ancho fijo `3.25rem`) y **Granja** (`sticky left-[calc(3.25rem_-_1px)]`, 1 px de solape para tapar la costura) quedan fijas al deslizar. Las celdas tienen `z-10` y los `<th>` `z-20 bg-surface`. El fondo es explícito: `bg-white` en filas impares y `bg-surface` en pares (la tabla usa `striped: true`, así que toda la fila alterna igual) y `group-hover:bg-row-hover` para acompañar el hover de la fila. La columna Granja lleva `border-r border-line` y trunca nombres largos (`max-w-[9.5rem]`, `sm:max-w-[16rem]`, nombre completo en `title`).
-- **Ayuda en "IQ-Col promedio":** icono `info` (SVG de Lucide en línea) junto al encabezado. Con hover o foco muestra el globo *"Indicador de calidad de canal (detalle en próxima versión)."* El icono lleva `data-no-sort`: hacer clic sobre él no reordena la columna.
+- **Ayuda en "IQ-Col promedio":** icono `info` (SVG de Lucide en línea) junto al encabezado. Con hover o foco muestra el globo *"Modelo propio de Alura. Calidad del canal según peso y % de magro frente al rango del país."* (constante `IQ_TIP` en `app.js`) El icono lleva `data-no-sort`: hacer clic sobre él no reordena la columna.
 
 ### Selector de Eje X (Distribución SEUROP y Variables físicas)
 
@@ -201,7 +213,7 @@ Los pesos y marcas de tiempo del complementario son **totales por lote** (por fe
 
 | Planta | Llave de lote |
 |---|---|
-| `Efege` | `planta ∣ fecha ∣ turno` (turno = últimos 3 caracteres de `id_lote`) |
+| `Efege` | `planta ∣ fecha ∣ turno` (`r.turno`: columna `turno` o, si viene vacía, últimos 3 caracteres de `id_lote`; sin ceros, ver §1) |
 | Las demás | `planta ∣ id_lote` |
 
 Un canal sin `id_lote` se omite (sin lote no hay cruce, así que no tiene datos de proceso). La desduplicación es por grupo: un lote que cruza dos periodos cuenta una vez en cada uno y, con *Rango de peso*, una vez en cada rango en que tenga canales (el total del lote no se reparte entre rangos).
@@ -230,12 +242,14 @@ El denominador del % frío suma únicamente el `peso_pie` de los lotes que sí t
 | Proceso | `fecha_peso_canal_caliente − fecha_sacrificio` | `#eb5852` |
 | Frío | `fecha_peso_canal_frio − fecha_peso_canal_caliente` | `#2f8f6b` |
 
-**Composición por planta:** `Efege` → Espera + Reposo · `Supercerdo Paisa` → Reposo + Proceso + Frío. `Progresar` queda fuera (no registra marcas de tiempo). Las plantas se identifican por nombre normalizado (`efege`; `supercerdo*`, ya que en los datos puede venir como `Supercerdo Paisa S.A.S`).
+**Composición por planta:** `Efege` → Espera + Reposo · `Supercerdo Paisa` y `Progresar` → Reposo + Proceso + Frío. Las plantas se identifican por nombre normalizado (`efege`, `progresar`; `supercerdo*`, ya que en los datos puede venir como `Supercerdo Paisa S.A.S`).
 
-**Controles:** pill de planta (`Efege` / `Supercerdo Paisa`; se deshabilita al agrupar por Planta) y pill de agrupación:
+**Progresar (pendiente de datos):** está habilitada en el selector y cruza por `id_lote` ↔ `Lote`, pero el complementario hoy solo le trae `fecha_peso_canal_frio` y los pesos; `fecha_sacrificio`, `fecha_peso_canal_caliente` y las demás fechas vienen vacías. Cada fase necesita dos fechas, así que al elegirla el Gantt muestra el estado vacío *"Sin registros de proceso para los filtros seleccionados"* hasta que el complementario traiga las fechas completas; entonces se llena solo, sin tocar código. En la agrupación Planta no aparece mientras no tenga datos.
 
-- **Últimos 15 lotes** (por defecto): lotes únicos de la planta elegida con Reposo no nulo, ordenados por `fecha_sacrificio` de más reciente a más antigua; se toman 15 y se invierten (más antiguo arriba, más reciente abajo). Etiqueta del eje Y: `dd/mm · Com. {turno}` (Efege) o `dd/mm · Lote {id_lote}` (Supercerdo).
-- **Tiempo / Granja / Planta / Rango de peso:** promedio de horas por fase de los lotes únicos de cada categoría (cada fase promedia solo los lotes donde no es `null`). Planta compara Efege vs. Supercerdo Paisa; las demás filtran por la planta elegida. Máximo 30 filas (Tiempo: los 30 periodos más recientes; Granja: las 30 con más lotes); el subtítulo lo indica.
+**Controles:** pill de planta (`Efege` / `Supercerdo Paisa` / `Progresar`; se deshabilita al agrupar por Planta) y pill de agrupación:
+
+- **Últimos 15 lotes** (por defecto): lotes únicos de la planta elegida con Reposo no nulo, ordenados por `fecha_sacrificio` de más reciente a más antigua; se toman 15 y se invierten (más antiguo arriba, más reciente abajo). Etiqueta del eje Y: `dd/mm · Com. {turno}` (Efege) o `dd/mm · Lote {id_lote}` (Supercerdo y Progresar).
+- **Tiempo / Granja / Planta / Rango de peso:** promedio de horas por fase de los lotes únicos de cada categoría (cada fase promedia solo los lotes donde no es `null`). Planta compara solo las plantas que tengan datos (subtítulo "Comparativo entre plantas"); las demás filtran por la planta elegida. Máximo 30 filas (Tiempo: los 30 periodos más recientes; Granja: las 30 con más lotes); el subtítulo lo indica.
 
 **Dibujo:** las barras de una fila se apilan una tras otra (una fase `null` o `0` se omite sin romper la continuidad). Cada segmento muestra sus horas con 1 decimal y coma (`12,3 h`) y **oculta** la etiqueta si mide menos de 44 px (el ancho se estima con el del contenedor, por eso el Gantt se redibuja —sin recalcular— cuando este cambia). Al final de cada fila va el total en negrita `#2a211f` (`26,4 h`), dibujado con una serie transparente auxiliar. La leyenda no es seleccionable (ocultar una fase dejaría desactualizado el total). El alto crece con el número de filas.
 
@@ -268,12 +282,14 @@ Cada fila del Parquet (una canal) se convierte en un objeto. Los nombres de colu
 | `id` | entero | Si falta, se asigna un consecutivo tras ordenar por fecha. |
 | `grasa_dorsal_mm` | número | Se excluye del promedio de grasa (no cuenta en n). |
 | `puntaje_seurop` | número 0–1 | Informativo; la clase SEUROP se calcula con el IQ-Col. |
-| `comercializador`, `sistema_medicion` | texto | `null` |
+| `comercializador` | texto | `null`. Alimenta el filtro global Comercializador (los nulos no se listan; ver §2). |
+| `sistema_medicion` | texto | `null` |
+| `turno` | texto (`"167"`) | Solo Efege. Se normaliza sin ceros a la izquierda; si viene vacío se toma de `id_lote` (§1). En las demás plantas queda `null`. Es la llave `Turno` del cruce con el complementario. |
 | `color`, `variacion_color` | entero | `null` |
 | `peso_canal_caliente_kg`, `peso_canal_fria_kg` | número | `null` |
 | `fecha_ingreso_planta`, `fecha_pesaje_pie`, `fecha_sacrificio`, `fecha_canal_caliente`, `fecha_canal_fria` | `TIMESTAMP` → `'YYYY-MM-DD HH:mm:ss'` | `null`. La zona de conversión es `APP_CONFIG.TIMEZONE`. |
 | `tiempo_espera_sacrificio_min` / `_horas` | entero / número | Si no vienen, se calculan tras el cruce con el complementario como `fecha_sacrificio − fecha_ingreso_planta`; `null` si falta alguna fecha. |
-| `id_lote` | texto | Lote del canal; también codifica el turno en Efege. Solo se usa como llave del cruce (§1); no se transforma. |
+| `id_lote` | texto | Lote del canal; también codifica el turno en Efege (respaldo de `turno`). Es la llave del cruce de las demás plantas (§1); no se transforma. |
 
 ### Columnas del complementario (`additional_data_cipa.parquet`)
 

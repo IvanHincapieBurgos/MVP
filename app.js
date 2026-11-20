@@ -291,7 +291,12 @@ App.data = (function () {
   const records = source.registros;
   let minDate = '9999-12-31';
   let maxDate = '0000-01-01';
+  const plantasPorComercializador = new Map(); // comercializador → Set(plantas); los nulos no entran
   for (const r of records) {
+    if (r.comercializador) {
+      if (!plantasPorComercializador.has(r.comercializador)) plantasPorComercializador.set(r.comercializador, new Set());
+      plantasPorComercializador.get(r.comercializador).add(r.planta);
+    }
     const k = U.periodKeys(r.fecha);
     r._dia = k.dia;
     r._semana = k.semana;
@@ -328,19 +333,41 @@ App.data = (function () {
     return granjas.filter((g) => [...plantasPorGranja.get(g)].some((p) => set.has(p)));
   }
 
+  const comercializadores = [...plantasPorComercializador.keys()].sort(byText);
+
+  /** Comercializadores (orden alfabético) con registros en al menos una de las plantas dadas. */
+  function comercializadoresDePlantas(lista) {
+    const set = new Set(lista);
+    return comercializadores.filter((c) => [...plantasPorComercializador.get(c)].some((p) => set.has(p)));
+  }
+
   /**
-   * plantas: nombres de planta · granjas: nombres únicos de granja.
+   * Restricción por comercializador. La mayoría de los canales no lo trae (null), así que con todos los
+   * comercializadores disponibles marcados (o ninguno disponible) NO se restringe y esos canales se
+   * conservan; con una selección parcial solo pasan los canales de los elegidos.
+   */
+  function comercializadorSet(f) {
+    if (!f.comercializadores) return null;
+    const disponibles = comercializadoresDePlantas(f.plantas || plantas);
+    const set = new Set(f.comercializadores);
+    return !disponibles.length || disponibles.every((c) => set.has(c)) ? null : set;
+  }
+
+  /**
+   * plantas: nombres de planta · granjas: nombres únicos de granja · comercializadores: ver comercializadorSet.
    * undefined ⇒ sin restricción; arreglo vacío ⇒ sin registros.
    */
   function filter(f) {
     const pSet = f.plantas ? new Set(f.plantas) : null;
     const gSet = f.granjas ? new Set(f.granjas) : null;
-    if ((pSet && !pSet.size) || (gSet && !gSet.size)) return [];
+    const cSet = comercializadorSet(f);
+    if ((pSet && !pSet.size) || (gSet && !gSet.size) || (cSet && !cSet.size)) return [];
     const out = [];
     for (const r of records) {
       if (r.fecha < f.desde || r.fecha > f.hasta) continue;
       if (pSet && !pSet.has(r.planta)) continue;
       if (gSet && !gSet.has(r.granja)) continue;
+      if (cSet && !cSet.has(r.comercializador)) continue;
       out.push(r);
     }
     return out;
@@ -433,7 +460,7 @@ App.data = (function () {
     return c;
   }
 
-  return { plantas, granjas, granjasDePlantas, minDate, maxDate, meta: source.meta, filter, aggregate, seuropCounts };
+  return { plantas, granjas, granjasDePlantas, comercializadores, comercializadoresDePlantas, minDate, maxDate, meta: source.meta, filter, aggregate, seuropCounts };
 })();
 
 /* ==========================================================================
@@ -1112,6 +1139,7 @@ App.filters = (function () {
     hasta: D.maxDate,
     plantas: D.plantas.slice(),
     granjas: D.granjas.slice(),
+    comercializadores: D.comercializadores.slice(),
   });
 
   const state = defaults();
@@ -1122,7 +1150,7 @@ App.filters = (function () {
   let pending = 0;
   let dataChanged = false;
 
-  /** Registros filtrados por fechas, plantas y granjas (memorizado). */
+  /** Registros filtrados por fechas, plantas, granjas y comercializadores (memorizado). */
   function rows() {
     if (cacheVersion !== dataVersion) {
       cache = D.filter(state);
@@ -1186,7 +1214,7 @@ App.views.inicio = (function () {
   let lastAgg = null; // última agregación: cambiar el eje X no vuelve a agregar
   let periodosMode = 'tiempo'; // modo con el que se configuró el orden de la tabla sincronizada
 
-  const IQ_TIP = 'Indicador de calidad de canal (detalle en próxima versión).';
+  const IQ_TIP = 'Modelo propio de Alura. Calidad del canal según peso y % de magro frente al rango del país.';
   const INFO_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>';
 
   const SERIES = {
@@ -2030,7 +2058,7 @@ App.views.scores = (function () {
 
   const GANTT_LAST = 15; // lotes/turnos del modo por defecto
   const GANTT_MAX_GROUPS = 30; // filas máximas del modo agrupado (el Gantt crece en alto con cada fila)
-  const GANTT_PLANTAS = ['Efege', 'Supercerdo Paisa']; // Progresar no registra marcas de tiempo
+  const GANTT_PLANTAS = ['Efege', 'Supercerdo Paisa', 'Progresar'];
   const GANTT_ROW_H = 34;
   const GANTT_LABEL_W = 150; // ancho reservado a las etiquetas del eje Y
   const GANTT_TOTAL_W = 80; // margen derecho para el total de horas
@@ -2043,7 +2071,11 @@ App.views.scores = (function () {
     { key: 'proceso', label: 'Proceso', color: T.accent, from: 'fecha_sacrificio', to: 'fecha_peso_canal_caliente' },
     { key: 'frio', label: 'Frío', color: T.good, from: 'fecha_peso_canal_caliente', to: 'fecha_peso_canal_frio' },
   ];
-  const PHASES_BY_PLANTA = { Efege: ['espera', 'reposo'], 'Supercerdo Paisa': ['reposo', 'proceso', 'frio'] };
+  const PHASES_BY_PLANTA = {
+    Efege: ['espera', 'reposo'],
+    'Supercerdo Paisa': ['reposo', 'proceso', 'frio'],
+    Progresar: ['reposo', 'proceso', 'frio'],
+  };
 
   const RTO = {
     cal: { name: 'Peso Canal Caliente', color: T.primary },
@@ -2103,13 +2135,14 @@ App.views.scores = (function () {
   const norm = (v) => String(v ?? '').trim().toLowerCase();
 
   /**
-   * Llave del lote: planta|fecha|turno en Efege (turno = últimos 3 dígitos de
-   * id_lote) y planta|lote en el resto. null si el canal no tiene lote (sin
-   * lote no hay cruce con el complementario, así que no aporta datos de proceso).
+   * Llave del lote: planta|fecha|turno en Efege (`turno` ya normalizado por
+   * data_loader: columna del principal o últimos 3 dígitos de id_lote, sin
+   * ceros a la izquierda) y planta|lote en el resto. null si el canal no tiene
+   * lote (sin lote no hay cruce con el complementario, así que no aporta datos de proceso).
    */
   function loteKey(r) {
     if (r.id_lote == null || r.id_lote === '') return null;
-    if (norm(r.planta) === 'efege') return `${r.planta}|${r.fecha}|${String(r.id_lote).slice(-3)}`;
+    if (norm(r.planta) === 'efege') return `${r.planta}|${r.fecha}|${r.turno}`;
     return `${r.planta}|${r.id_lote}`;
   }
 
@@ -2283,10 +2316,11 @@ App.views.scores = (function () {
 
   /* ---------- Tiempos en Planta (Gantt) ------------------------------------ */
 
-  /** Planta del Gantt: Efege o Supercerdo Paisa (el nombre en los datos puede traer sufijo, p. ej. "S.A.S"). */
+  /** Planta del Gantt: Efege, Supercerdo Paisa o Progresar (el nombre en los datos puede traer sufijo, p. ej. "S.A.S"). */
   function ganttPlanta(r) {
     const p = norm(r.planta);
     if (p === 'efege') return 'Efege';
+    if (p === 'progresar') return 'Progresar';
     return p.startsWith('supercerdo') ? 'Supercerdo Paisa' : null;
   }
 
@@ -2325,7 +2359,7 @@ App.views.scores = (function () {
       .reverse()
       .map(({ r, h }) => {
         const fecha = `${r.fecha_sacrificio.slice(8, 10)}/${r.fecha_sacrificio.slice(5, 7)}`;
-        const id = planta === 'Efege' ? `Com. ${String(r.id_lote).slice(-3)}` : `Lote ${r.id_lote}`;
+        const id = planta === 'Efege' ? `Com. ${r.turno}` : `Lote ${r.id_lote}`;
         return { label: `${fecha} · ${id}`, h, comp, n: 1, total: sumHours(h, comp) };
       });
   }
@@ -2366,7 +2400,7 @@ App.views.scores = (function () {
       sub = `${planta} · últimos ${GANTT_LAST} lotes/turnos por fecha de sacrificio (el más reciente abajo) · horas por fase`;
     } else {
       const gran = dim === 'tiempo' ? ` por ${U.granLabel(F.state.gran).toLowerCase()}` : ` por ${dimLabel(dim).toLowerCase()}`;
-      sub = `${dim === 'planta' ? 'Efege vs. Supercerdo Paisa' : planta} · promedio de horas por fase de los lotes únicos${gran}`;
+      sub = `${dim === 'planta' ? 'Comparativo entre plantas' : planta} · promedio de horas por fase de los lotes únicos${gran}`;
       if (truncated) sub += dim === 'granja' ? ` · ${GANTT_MAX_GROUPS} granjas con más lotes` : ` · últimos ${GANTT_MAX_GROUPS} periodos`;
     }
     return { items, sub };
@@ -2383,7 +2417,7 @@ App.views.scores = (function () {
     ganttWidth = el.clientWidth;
     if (!items.length) return C.setEmpty(charts.gantt, EMPTY_MSG);
 
-    // Solo las fases que aparecen en alguna fila (Efege: Espera + Reposo · Supercerdo: Reposo + Proceso + Frío)
+    // Solo las fases que aparecen en alguna fila (Efege: Espera + Reposo · Supercerdo y Progresar: Reposo + Proceso + Frío)
     const phases = PHASES.filter((p) => items.some((it) => it.comp.includes(p.key)));
     const maxTotal = Math.max(...items.map((it) => it.total));
     const xMax = Math.max(1, Math.ceil(maxTotal / 5) * 5);
@@ -2487,7 +2521,7 @@ App.views.scores = (function () {
 
   function syncPills() {
     const active = { rend: state.rend.dim, planta: state.gantt.planta, gantt: state.gantt.dim };
-    const porPlanta = state.gantt.dim === 'planta'; // compara ambas plantas: el selector de planta no aplica
+    const porPlanta = state.gantt.dim === 'planta'; // compara las plantas con datos: el selector de planta no aplica
     ui.root.querySelectorAll('[data-pill]').forEach((group) => {
       const name = group.dataset.pill;
       group.querySelectorAll('button').forEach((b) => {
@@ -2595,12 +2629,15 @@ App.views.scores = (function () {
   const plantaOptions = () => D.plantas.map((p) => ({ value: p, label: p }));
   /** Lista plana de granjas únicas (alfabética) con registros en las plantas elegidas. */
   const granjaOptions = (plantas) => D.granjasDePlantas(plantas).map((g) => ({ value: g, label: g }));
+  /** Comercializadores (alfabéticos, sin nulos) con registros en las plantas elegidas. */
+  const comercializadorOptions = (plantas) => D.comercializadoresDePlantas(plantas).map((c) => ({ value: c, label: c }));
 
   function mountFilters() {
     // Fila 1: filtros de datos · Fila 2: agrupación temporal (solo visualización)
     shell.filters.innerHTML = `
       <div class="flex items-center gap-2">
         <div class="w-[10rem]" data-ref="plantas"></div>
+        <div class="w-[14rem]" data-ref="comercializadores"></div>
         <div class="w-[11.5rem]" data-ref="granjas"></div>
         <div data-ref="range"></div>
         <button type="button" class="btn-ghost shrink-0" data-ref="reset" title="Restablecer filtros" aria-label="Restablecer filtros">
@@ -2638,7 +2675,14 @@ App.views.scores = (function () {
       label: 'Planta',
       options: plantaOptions(),
       selected: s.plantas,
-      onChange: (plantas) => F.set({ plantas, granjas: cascadeGranjas(plantas) }),
+      onChange: (plantas) => F.set({ plantas, granjas: cascadeGranjas(plantas), comercializadores: cascadeComercializadores(plantas) }),
+    });
+
+    ctl.comercializadores = new MultiSelect(ref('comercializadores'), {
+      label: 'Comercializador',
+      options: comercializadorOptions(s.plantas),
+      selected: s.comercializadores,
+      onChange: (comercializadores) => F.set({ comercializadores }),
     });
 
     ctl.granjas = new MultiSelect(ref('granjas'), {
@@ -2653,6 +2697,7 @@ App.views.scores = (function () {
       const d = F.state;
       ctl.range.set(d.desde, d.hasta);
       ctl.plantas.setOptions(plantaOptions(), d.plantas);
+      ctl.comercializadores.setOptions(comercializadorOptions(d.plantas), d.comercializadores);
       ctl.granjas.setOptions(granjaOptions(d.plantas), d.granjas);
       syncGranButtons(granGroup);
     });
@@ -2687,6 +2732,16 @@ App.views.scores = (function () {
     const opts = granjaOptions(plantas);
     const selected = opts.filter((o) => prevSelected.has(o.value) || !prevOptions.has(o.value)).map((o) => o.value);
     ctl.granjas.setOptions(opts, selected);
+    return selected;
+  }
+
+  /** Cambio de plantas: conserva los comercializadores elegidos y auto-selecciona los que aparecen. */
+  function cascadeComercializadores(plantas) {
+    const prevOptions = new Set(ctl.comercializadores.options.map((o) => o.value));
+    const prevSelected = new Set(F.state.comercializadores);
+    const opts = comercializadorOptions(plantas);
+    const selected = opts.filter((o) => prevSelected.has(o.value) || !prevOptions.has(o.value)).map((o) => o.value);
+    ctl.comercializadores.setOptions(opts, selected);
     return selected;
   }
 

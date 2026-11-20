@@ -531,6 +531,9 @@ function sanitizeRecords(rows) {
       }
     }
 
+    // Llave de turno del cruce y de la desduplicación de Scores (ver turnoCanal)
+    r.turno = turnoCanal(r);
+
     // app.js agrupa por `fecha` (YYYY-MM-DD): si no viene, se toma del ingreso a planta
     r.fecha = toDate(r.fecha) || (r.fecha_ingreso_planta ? r.fecha_ingreso_planta.slice(0, 10) : null);
     // % magro expresado como fracción (0,62) → porcentaje (62)
@@ -622,20 +625,26 @@ function buildAdditionalIndex(additionalRows) {
 }
 
 /**
- * El principal no trae columnas `lote` ni `turno`: ambos salen de `id_lote` (si algún día llegan, tienen prioridad).
- *  - Lote: `id_lote` tal cual (Supercerdo Paisa, Progresar y demás).
- *  - Turno (Efege): `id_lote` es DDMMAA + "02" + turno de 3 dígitos (p. ej. 16112602167 → turno 167);
- *    en registros antiguos es solo el turno ("167"). En ambos casos son los últimos 3 caracteres.
+ * El principal no trae columna `lote`: el lote es `id_lote` tal cual (Supercerdo Paisa, Progresar y demás).
+ * El turno (solo Efege) sale de la columna `turno` del principal y, cuando viene vacía, de `id_lote`
+ * (DDMMAA + "02" + turno de 3 dígitos, p. ej. 16112602167 → 167; en registros antiguos es solo el turno).
+ * Siempre queda sin ceros a la izquierda (`"041"` → `"41"`), como las llaves del complementario.
  */
 const loteDe = (r) => r.lote ?? r.id_lote;
-const turnoDe = (r) => r.turno ?? String(r.id_lote ?? '').slice(-3);
+
+/** Turno normalizado del canal (texto sin ceros) o null. Se guarda en `r.turno` al sanear el registro. */
+function turnoCanal(r) {
+  const propio = normalizeInt(r.turno);
+  if (propio) return propio;
+  if (!PLANTAS_POR_FECHA_TURNO.has(normalizeText(r.planta))) return null;
+  return normalizeInt(String(r.id_lote ?? '').slice(-3)) || null;
+}
 
 /** Efege: Fecha + Turno. Cualquier otra planta: Lote (si el canal no tiene lote, no hay cruce). */
 function findAdditional(r, { byFechaTurno, byLote }) {
   if (PLANTAS_POR_FECHA_TURNO.has(normalizeText(r.planta))) {
     const fecha = normalizeDate(r.fecha);
-    const turno = normalizeInt(turnoDe(r));
-    return fecha && turno ? byFechaTurno.get(`${fecha}|${turno}`) : undefined;
+    return fecha && r.turno ? byFechaTurno.get(`${fecha}|${r.turno}`) : undefined;
   }
   const lote = normalizeText(loteDe(r));
   return lote ? byLote.get(lote) : undefined;
@@ -661,7 +670,7 @@ function joinAdditional(registros, additionalRows) {
       cruzados++;
       p.cruzados++;
     } else if (sinCruce.length < 3) {
-      sinCruce.push({ planta: r.planta, fecha: normalizeDate(r.fecha), turno: normalizeInt(turnoDe(r)), lote: normalizeText(loteDe(r)) });
+      sinCruce.push({ planta: r.planta, fecha: normalizeDate(r.fecha), turno: r.turno, lote: normalizeText(loteDe(r)) });
     }
     for (const f of ADDITIONAL_FIELDS) if (r[f] == null) r[f] = match && match[f] != null ? match[f] : null;
     if (match) for (const [c, v] of Object.entries(match)) if (!(c in r)) r[c] = v;
